@@ -179,15 +179,15 @@ class Client:
             cmd = cmd_parts[0].lower()
 
             # ----- Help -----
-            if cmd in ("help", "-help"):
+            if cmd in ("help", "-h"):
                 print("[i] Available commands:")
                 print("  chat <recipient> <message>  - send a message to a user or 'Group'")
-                print("  history <user>              - show message history with a specific user")
+                print("  history [user]              - show message history with a specific user, or all unread messages if no user is specified")
                 print("  whoami                     - show your current username")
                 print("  ping                       - send a ping to the server")
                 print("  list                       - list all connected users")
-                print("  quit                       - exit the client")
-                print("  help or -help              - show this help message")
+                print("  quit or q                  - exit the client")
+                print("  help or -h                 - show this help message")
                 
                 continue
 
