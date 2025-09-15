@@ -1,215 +1,164 @@
 import asyncio
 import websockets
 import json
+import socket
+import time
+import signal
 
-class Server:
-    def __init__(self):
-        self.clients = {}
-        self.client_public_keys = {}
-        
-    async def client_sign_up(self, client_id, client_public_key, websocket):
-        """Sign up a new client"""
-        # if client id is already taken, or client attempts to use a restricted username, respond as unavailable
-        if client_id.lower() == "group" or client_id.lower() == "server" or client_id in self.clients:
-            await websocket.send(json.dumps({
-                "type": "Server Auth",
-                "content": "Unavailable",
-                "recipient": "Guest",
-                "sender": "Server"
-            }))
-            return None
-        # if client id is available, add user to client list 
-        else:
-            await websocket.send(json.dumps({
-                "type": "Server Auth",
-                "content": "Success",
-                "recipient": client_id,
-                "sender": "Server"
-            }))
-            self.clients[client_id] = websocket
-            self.client_public_keys[client_id] = client_public_key
-            
-            print(f"Client {client_id} signed up. Total clients: {len(self.clients)}")
-            return client_id
+# ---------------------- Configuration ----------------------
+WS_PORT = 8765
+UDP_DISCOVERY_PORT = 9999
+HEARTBEAT_INTERVAL = 10
+HEARTBEAT_TIMEOUT = 30
 
-    async def client_sign_in(self, client_id, client_public_key, websocket):
-        """Sign in a client"""
-        # For now, treat sign-in the same as sign-up since we don't have persistent storage
-        # In a real implementation, you'd verify credentials against a database
-        if client_id in self.clients:
-            # Update the websocket connection for existing user
-            self.clients[client_id] = websocket
-            self.client_public_keys[client_id] = client_public_key
-            await websocket.send(json.dumps({
-                "type": "Server Auth",
-                "content": "Success",
-                "recipient": client_id,
-                "sender": "Server"
-            }))
-            print(f"Client {client_id} signed in. Total clients: {len(self.clients)}")
-            return client_id
-        else:
-            # If client doesn't exist, treat as sign-up
-            return await self.client_sign_up(client_id, client_public_key, websocket)
+# ---------------------- Global State ----------------------
+connected_clients = {}   # username -> websocket
+client_public_keys = {}  # username -> public key
+client_last_seen = {}    # username -> last heartbeat timestamp
+tasks = []               # background tasks
 
-    async def send_group_message(self, encrypted_message, sender_id):
-        """Broadcast an encrypted message to all clients (except sender)"""
-        # Note: For group messages to work properly with encryption, each message 
-        # would need to be encrypted separately for each recipient's public key.
-        # This is a simplified version that forwards the encrypted message as-is.
-        if self.clients:
-            send_tasks = []
-            for client_id, client_ws in self.clients.items():
-                if client_id != sender_id:
-                    try:
-                        # Forward the encrypted message exactly as received
-                        send_tasks.append(client_ws.send(json.dumps(encrypted_message)))
-                    except Exception as e:
-                        print(f"Failed to queue message for {client_id}: {e}")
-            
-            if send_tasks:
-                # Send all messages concurrently
-                results = await asyncio.gather(*send_tasks, return_exceptions=True)
-                # Log any exceptions
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        print(f"Failed to send group message to client: {result}")
+# ---------------------- WebSocket Handler ----------------------
+async def handle_client(ws):
+    username = None
+    try:
+        async for msg in ws:
+            data = json.loads(msg)
+            msg_type = data.get("type")
+            sender = data.get("sender")
 
-    async def send_message(self, encrypted_message, sender_id, websocket):
-        """Forward an encrypted message to a specific client"""
-        recipient_id = encrypted_message.get("recipient")
-        
-        if recipient_id in self.clients:
-            recipient_ws = self.clients[recipient_id]
-            try:
-                # Forward the encrypted message exactly as received
-                await recipient_ws.send(json.dumps(encrypted_message))
-                print(f"Message forwarded from {sender_id} to {recipient_id}")
-            except Exception as e:
-                print(f"Failed to forward message to {recipient_id}: {e}")
-                await websocket.send(json.dumps({
-                    "type": "Error",
-                    "content": "Failed to deliver message",
-                    "recipient": sender_id,
-                    "sender": "Server"
+            # ---------------------- Heartbeat ----------------------
+            if msg_type == "heartbeat_ack":
+                client_last_seen[sender] = time.time()
+                continue
+
+            # ---------------------- Sign-in ----------------------
+            if msg_type == "Sign-in":
+                requested_name = data.get("content")
+                if requested_name in connected_clients:
+                    await ws.send(json.dumps({"type": "Server Auth", "content": "Unavailable"}))
+                else:
+                    username = requested_name
+                    connected_clients[username] = ws
+                    client_public_keys[username] = data.get("public_key")
+                    client_last_seen[username] = time.time()
+                    await ws.send(json.dumps({"type": "Server Auth", "content": "Success"}))
+                    print(f"[+] User signed in: {username}")
+                continue
+
+            # ---------------------- Public Key Request ----------------------
+            if msg_type == "public_key_request":
+                target = data.get("recipient")
+                pub_key = client_public_keys.get(target)
+                await ws.send(json.dumps({
+                    "type": "Public Key",
+                    "content": pub_key,
+                    "recipient": sender,
+                    "sender": target
                 }))
-        else:
-            # Recipient not connected, notify the sender
-            await websocket.send(json.dumps({
-                "type": "Error",
-                "content": f"Recipient '{recipient_id}' not found or not connected",
-                "recipient": sender_id,
-                "sender": "Server"
-            }))
+                continue
 
-    async def handle_public_key_request(self, message, websocket):
-        """Handle public key requests"""
-        requester = message.get("sender")
-        recipient = message.get("recipient")
-        
-        # Look up the recipient's public key
-        recipient_key = self.client_public_keys.get(recipient)
-        
-        if recipient_key:
-            # Send the public key back to the requester
-            await websocket.send(json.dumps({
-                "type": "Public Key",
-                "content": recipient_key,
-                "recipient": requester,
-                "sender": recipient
-            }))
-            print(f"Sent {recipient}'s public key to {requester}")
-        else:
-            # Recipient not found or no key available
-            await websocket.send(json.dumps({
-                "type": "Public Key",
-                "content": None,
-                "recipient": requester,
-                "sender": recipient
-            }))
-            print(f"Public key for {recipient} not found, sent None to {requester}")
-            
-    async def handle_client(self, websocket):
-        """Handle messages from clients"""
-        client_id = "guest"
-        
-        try:
-            async for json_message in websocket:
+            # ---------------------- Chat Message ----------------------
+            if msg_type == "chat":
+                recipient = data.get("recipient", "")
+                if recipient.lower() == "group":
+                    for user, client_ws in list(connected_clients.items()):
+                        if user != sender:
+                            try:
+                                await client_ws.send(json.dumps(data))
+                            except websockets.exceptions.ConnectionClosed:
+                                cleanup_client(user)
+                elif recipient in connected_clients:
+                    try:
+                        await connected_clients[recipient].send(json.dumps(data))
+                    except websockets.exceptions.ConnectionClosed:
+                        cleanup_client(recipient)
+                else:
+                    await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                continue
+
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        if username:
+            cleanup_client(username)
+
+# ---------------------- Cleanup ----------------------
+def cleanup_client(username):
+    connected_clients.pop(username, None)
+    client_public_keys.pop(username, None)
+    client_last_seen.pop(username, None)
+    print(f"[-] Removed client: {username}")
+
+# ---------------------- Heartbeat Loop ----------------------
+async def heartbeat_loop():
+    try:
+        while True:
+            now = time.time()
+            to_remove = []
+
+            for username, ws in list(connected_clients.items()):
                 try:
-                    message = json.loads(json_message)
-                    msg_type = message.get("type")
-                    
-                    # Log received message (but don't log encrypted content)
-                    if msg_type == "chat":
-                        print(f"Encrypted message from {message.get('sender')} to {message.get('recipient')}")
-                    else:
-                        print(f"Received {msg_type} message from {message.get('sender', 'unknown')}")
-                    
-                    if msg_type == "Sign-in":
-                        client_id = await self.client_sign_in(
-                            message["content"], 
-                            message["public_key"], 
-                            websocket
-                        )
-                        
-                    elif msg_type == "Sign-up":
-                        client_id = await self.client_sign_up(
-                            message["content"], 
-                            message["public_key"], 
-                            websocket
-                        )
-                        
-                    elif msg_type == "chat":
-                        # Don't decrypt - just forward the encrypted message
-                        if message.get("recipient", "").lower() == "group":
-                            await self.send_group_message(message, client_id)
-                        else:
-                            await self.send_message(message, client_id, websocket)
-                            
-                    elif msg_type == "public_key_request":
-                        await self.handle_public_key_request(message, websocket)
-                        
-                    else:
-                        print(f"Unknown message type: {msg_type}")
-                        
-                except json.JSONDecodeError:
-                    print("Received invalid JSON message")
-                    await websocket.send(json.dumps({
-                        "type": "Error",
-                        "content": "Invalid JSON format",
-                        "recipient": client_id,
-                        "sender": "Server"
-                    }))
-                except Exception as e:
-                    print(f"Error processing message: {e}")
-                    await websocket.send(json.dumps({
-                        "type": "Error",
-                        "content": "Message processing error",
-                        "recipient": client_id,
-                        "sender": "Server"
-                    }))
+                    await ws.send(json.dumps({"type": "heartbeat"}))
+                except websockets.exceptions.ConnectionClosed:
+                    to_remove.append(username)
 
-        except websockets.exceptions.ConnectionClosed:
-            print(f"Client connection closed normally")
-        except Exception as e:
-            print(f"Unexpected error handling client: {e}")
-        
-        finally:
-            # Remove client when disconnected
-            if client_id and client_id in self.clients:
-                del self.clients[client_id]
-                if client_id in self.client_public_keys:
-                    del self.client_public_keys[client_id]
-                print(f"Client {client_id} disconnected. Total clients: {len(self.clients)}")
+                last_seen = client_last_seen.get(username, now)
+                if now - last_seen > HEARTBEAT_TIMEOUT:
+                    to_remove.append(username)
 
-    async def start(self):
-        """Start running server"""
-        print("WebSocket chat server running on ws://localhost:8765")
-        print("The server will forward encrypted messages without decrypting them")
-        
-        async with websockets.serve(self.handle_client, "localhost", 8765):
-            await asyncio.Future()  # Run forever
+            for username in set(to_remove):
+                cleanup_client(username)
+
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+    except asyncio.CancelledError:
+        print("[i] Heartbeat loop cancelled")
+
+# ---------------------- UDP Discovery ----------------------
+async def udp_discovery_server():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('', UDP_DISCOVERY_PORT))
+    print(f"[i] UDP discovery server running on port {UDP_DISCOVERY_PORT}")
+    loop = asyncio.get_event_loop()
+    try:
+        while True:
+            data, addr = await loop.run_in_executor(None, sock.recvfrom, 1024)
+            if data.decode() == "CHAT_DISCOVERY":
+                ip = socket.gethostbyname(socket.gethostname())
+                response = f"ws://{ip}:{WS_PORT}"
+                sock.sendto(response.encode(), addr)
+    except asyncio.CancelledError:
+        sock.close()
+        print("[i] UDP discovery loop cancelled")
+
+# ---------------------- Graceful Shutdown ----------------------
+def shutdown():
+    print("\n[i] Server shutting down...")
+    for username, ws in list(connected_clients.items()):
+        asyncio.create_task(ws.close(code=1001, reason="Server shutting down"))
+    for t in tasks:
+        t.cancel()
+
+# ---------------------- Main ----------------------
+async def main():
+    ws_server = await websockets.serve(handle_client, "0.0.0.0", WS_PORT)
+    tasks.append(asyncio.create_task(heartbeat_loop()))
+    tasks.append(asyncio.create_task(udp_discovery_server()))
+    print(f"[i] WebSocket server running on port {WS_PORT}")
+
+    await asyncio.Future()  # run until cancelled
 
 if __name__ == "__main__":
-    server = Server()
-    asyncio.run(server.start())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[i] Server shutting down (Ctrl+C)")
+        # Cancel all background tasks
+        for t in tasks:
+            t.cancel()
+        # Close all client connections
+        for username, ws in list(connected_clients.items()):
+            try:
+                asyncio.run(ws.close(code=1001, reason="Server shutting down"))
+            except:
+                pass
+        print("[i] Shutdown complete")
