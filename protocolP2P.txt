@@ -75,7 +75,7 @@ Private Message:
    }
 3. Server forwards to local client if available; otherwise forwards to peers.
 
-Group Message:
+Group Message: TODO
 1. Set recipient: "Group".
 2. Server sends to all local clients except sender.
 3. Server forwards to all peers, which do the same.
