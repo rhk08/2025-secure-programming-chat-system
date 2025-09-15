@@ -22,11 +22,37 @@ tasks = []                 # background tasks
 # ---------------------- Graceful Shutdown ----------------------
 async def shutdown():
     print("[i] Shutting down server...")
+    
+    # Close all local client connections
+    close_tasks = []
     for username, ws in list(connected_clients.items()):
         try:
-            await ws.close(code=1001, reason="Server shutting down")
-        except:
-            pass
+            close_tasks.append(ws.close(code=1001, reason="Server shutting down"))
+        except Exception as e:
+            print(f"[!] Error closing connection for {username}: {e}")
+    if close_tasks:
+        await asyncio.gather(*close_tasks, return_exceptions=True)
+
+    # Notify peer servers
+    notify_tasks = []
+    for peer_uri in peer_servers:
+        async def notify_peer(uri):
+            try:
+                async with websockets.connect(uri) as peer_ws:
+                    msg = {
+                        "type": "server_shutdown",
+                        "sender": f"0.0.0.0:{WS_PORT}",
+                        "content": list(connected_clients.keys())
+                    }
+                    await peer_ws.send(json.dumps(msg))
+            except Exception as e:
+                print(f"[!] Failed to notify peer {uri}: {e}")
+        notify_tasks.append(notify_peer(peer_uri))
+
+    if notify_tasks:
+        await asyncio.gather(*notify_tasks, return_exceptions=True)
+    
+        
     for t in tasks:
         t.cancel()
     await asyncio.sleep(0.1)
