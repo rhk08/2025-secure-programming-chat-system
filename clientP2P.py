@@ -6,7 +6,9 @@ import base64
 from datetime import datetime
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
-from Crypto.Random import get_random_bytes
+from Crypto.Random import get_random_bytes 
+from copy import deepcopy
+import time 
 
 UDP_DISCOVERY_PORT = 9999
 HEARTBEAT_INTERVAL = 10
@@ -24,6 +26,13 @@ class Client:
         
         self.message_history = {}
         self.unread_messages = {}
+
+        self.JSON_base_template = self._load_json("SOCP.json")
+
+    # ---------------- Load JSON template from file ----------------
+    def _load_json(self, file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
 
     # ---------------- LAN server discovery ----------------
     def discover_server(self, timeout=3):
@@ -54,13 +63,24 @@ class Client:
             "tag": base64.b64encode(tag).decode(),
             "ciphertext": base64.b64encode(ciphertext).decode()
         }
+    
+#      TODO: returned info above needs to match this SOCP format, also decryption below needs to be modified
+#      "payload":{
+#           "ciphertext":"<b64url AES-256-GCM>",
+#           "iv":"<b64url 12-bytes>",
+#           "tag":"<b64url 16-bytes>",
+#           "wrapped_key":"<b64url RSA-OAEP(SHA-256)>",
+#           "sender_pub":"<b64url RSA-4096 pub of Bob>",
+#           "content_sig":"<b64url RSASSA-PSS over SHA-256(ciphertext|iv|tag|from|to|ts)>"
+#       }
 
     async def decrypt_message(self, message):
         try:
-            enc_aes_key = base64.b64decode(message["enc_aes_key"])
-            nonce = base64.b64decode(message["nonce"])
-            tag = base64.b64decode(message["tag"])
-            ciphertext = base64.b64decode(message["ciphertext"])
+            payload = message['payload']
+            enc_aes_key = base64.b64decode(payload["enc_aes_key"])
+            nonce = base64.b64decode(payload["nonce"])
+            tag = base64.b64decode(payload["tag"])
+            ciphertext = base64.b64decode(payload["ciphertext"])
             cipher_rsa = PKCS1_OAEP.new(self.private_key)
             aes_key = cipher_rsa.decrypt(enc_aes_key)
             cipher_aes = AES.new(aes_key, AES.MODE_EAX, nonce=nonce)
@@ -73,26 +93,45 @@ class Client:
     async def signin(self):
         while True:
             client_username = input("Enter username: ")
-            message_data = json.dumps({
-                "type": "sign_in",
-                "content": client_username,
-                "sender": self.client_id,
-                "public_key": self.public_key.export_key().decode()
-            })
-            await self.websocket.send(message_data)
+            
+            # message formatted to SOCP specifications
+            message = deepcopy(self.JSON_base_template)
+            message["type"] = "USER_HELLO"
+            message["from"] = client_username
+            message["to"] = "Server" #TODO: sub with actual server details 
+            message["ts"] = time.time()
+            message["payload"] = {
+                "client": "cli-v1",
+                "pubkey": base64.b64encode(self.public_key.export_key()).decode(),
+                "enc_pubkey": base64.b64encode(self.public_key.export_key()).decode()
+            }
+
+            await self.websocket.send(json.dumps(message))
+            
             response = json.loads(await self.websocket.recv())
-            if response["content"] == "Success":
+            if response["type"] == "ERROR":
+                print("[!] Username unavailable, try again.")
+            else:
                 self.client_id = client_username
                 print(f"[i] Signed in as {client_username}")
-                return
-            else:
-                print("[!] Username unavailable, try again.")
 
+                #sharing available commands with user on join
+                print("[i] Available commands:")
+                print("  chat <recipient> <message>  - send a message to a user or 'Group'")
+                print("  history [user]              - show message history with a specific user, or all unread messages if no user is specified")
+                print("  whoami                     - show your current username")
+                print("  ping                       - send a ping to the server")
+                print("  list                       - list all connected users")
+                print("  quit or q                  - exit the client")
+                print("  help or -h                 - show this help message")
+
+                return
+        
     
     def store_message(self, msg, plaintext):
-        sender = msg.get('sender', 'Unkown') 
-        recipient = msg.get('recipient', 'Unkown')  # fallback to Group
-        timestamp = msg.get('timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        sender = msg.get('from', 'Unknown') 
+        recipient = msg.get('to', 'Unknown')  # fallback to Group
+        timestamp = msg.get('ts', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     
         history_key = sender if recipient == self.client_id else recipient  # store by conversation
 
@@ -111,8 +150,7 @@ class Client:
             "seen" : False
         })
         
-       
-        
+    
     # ---------------- Listen ----------------
     async def listen_for_messages(self):
         try:
@@ -128,7 +166,7 @@ class Client:
                     await self._incoming_responses.put(msg)
                 else:
                     # handle chat, heartbeat, etc
-                    if msg["type"] == "chat":
+                    if msg['type'] == "USER_DELIVER":
                         plaintext = await self.decrypt_message(msg)
                         """
                         {
@@ -142,11 +180,11 @@ class Client:
                         
                         if plaintext:
                             self.store_message(msg, plaintext)
-                            unread_count = self.unread_messages.get(msg["sender"], 0)
-                            if unread_count > 0:
-                                print(f"\n[!] Message received from {msg['sender']} ({unread_count} unread)")
-                            else:
-                                print(f"\n[!] Message received from {msg['sender']}")
+                            # unread_count = self.unread_messages.get(msg["sender"], 0)
+                            # if unread_count > 0:
+                            #     print(f"\n[!] Message received from {msg['sender']} ({unread_count} unread)")
+                            # else:
+                            print(f"\n[!] Message: {plaintext} received from {msg['payload']['sender']}")
                             print(f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
                             
                                 
@@ -269,9 +307,7 @@ class Client:
                     # Mark message as seen
                     msg["seen"] = True
                    
-                
                 self.unread_messages[target_user] = 0
-                
                     
                 continue
 
@@ -285,6 +321,9 @@ class Client:
                 message = cmd_parts[2]
 
                 # Request recipient's public key
+                #message_json = deepcopy(self.JSON_base_template)
+                # TODO: Can't currently see any JSON for retrieving public keys in SOCP??
+
                 await self.websocket.send(json.dumps({
                     "type": "public_key_request",
                     "recipient": recipient,
@@ -303,18 +342,22 @@ class Client:
                     print(f"[!] Cannot obtain public key for {recipient}")
                     continue
 
+                #modified
+                pub_key = base64.b64decode(pub_key)
+
                 # Encrypt and send
                 enc_data = await self.encrypt_message(message, pub_key)
-                payload = {
-                    "type": "chat", 
-                    "recipient": recipient, 
-                    "sender": self.client_id, 
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                    **enc_data
-                }
-                self.store_message(payload, message)
+
+                message_json = deepcopy(self.JSON_base_template)
+                message_json['type'] = "MSG_DIRECT"
+                message_json['from'] = self.client_id
+                message_json['to'] = recipient
+                message_json['ts'] = time.time()
+                message_json['payload'] = enc_data   
+
+                self.store_message(message_json, message)
                 
-                await self.websocket.send(json.dumps(payload))
+                await self.websocket.send(json.dumps(message_json))
                 print("[i] Message sent successfully!")
                 continue
 

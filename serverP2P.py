@@ -4,6 +4,7 @@ import json
 import socket
 import time
 import signal
+from copy import deepcopy
 
 # ---------------------- Configuration ----------------------
 WS_PORT = 8765
@@ -18,6 +19,13 @@ client_last_seen = {}      # username -> last heartbeat timestamp
 remote_users = {}          # username -> server_uri (remote users on peers)
 peer_servers = set()       # discovered peer servers
 tasks = []                 # background tasks
+
+# ---------------- Load JSON template from file ----------------
+def _load_json(file_path):
+    with open(file_path, 'r') as file:
+        return json.load(file)
+        
+JSON_base_template = _load_json("SOCP.json")
 
 # ---------------------- Graceful Shutdown ----------------------
 async def shutdown():
@@ -138,7 +146,7 @@ async def propagate_user_disconnect(username):
         except:
             pass
 
-async def check_username_peers(username):
+async def check_username_peers(username): # TODO: json update
     for peer in peer_servers:
         try:
             async with websockets.connect(peer) as ws:
@@ -200,19 +208,30 @@ async def handle_client(ws):
                 await connected_clients[sender].send(json.dumps(response))
             
             # ---------------------- Sign-in ----------------------
-            if msg_type == "sign_in":
-                requested_name = data.get("content")
+            if msg_type == "USER_HELLO":
+                requested_name = data.get("from")
                 local_free = requested_name not in connected_clients
                 peer_free = await check_username_peers(requested_name)
                 if local_free and peer_free:
                     username = requested_name
                     connected_clients[username] = ws
-                    client_public_keys[username] = data.get("public_key")
+                    payload = data.get("payload", {})
+                    client_public_keys[username] = payload.get("pubkey")
                     client_last_seen[username] = time.time()
                     await ws.send(json.dumps({"type": "Server Auth", "content": "Success"}))
                     print(f"[+] User signed in: {username}")
                 else:
-                    await ws.send(json.dumps({"type": "Server Auth", "content": "Unavailable"}))
+                    # message formatted to SOCP specifications
+                    message = deepcopy(JSON_base_template)
+                    message["type"] = "ERROR"
+                    message["from"] = "Server"
+                    message["to"] = requested_name
+                    message["ts"] = time.time()
+                    message["payload"] = {
+                        "code": "NAME_IN_USE",
+                        "detail": "Username already taken"
+                    }
+                    await ws.send(json.dumps(message))
                 continue
 
             # ---------------------- Public Key Request ----------------------
@@ -228,30 +247,44 @@ async def handle_client(ws):
                 continue
 
             # ---------------------- Chat ----------------------
-            if msg_type == "chat":
-                recipient = data.get("recipient", "")
-                if recipient.lower() == "group":
-                    # Send to local clients
-                    for user, client_ws in list(connected_clients.items()):
-                        if user != sender:
-                            try:
-                                await client_ws.send(json.dumps(data))
-                            except:
-                                cleanup_client(user)
-                    # Forward to peers
-                    for peer in peer_servers:
-                        try:
-                            async with websockets.connect(peer) as ws_peer:
-                                await ws_peer.send(json.dumps(data))
-                        except:
-                            pass
-                elif recipient in connected_clients:
+            if msg_type == "MSG_DIRECT":
+                recipient = data.get("to", "")
+                if recipient in connected_clients:
                     try:
-                        await connected_clients[recipient].send(json.dumps(data))
+                        # send message to specified client according to SOCP format 
+                        message = deepcopy(JSON_base_template)
+                        message["type"] = "USER_DELIVER"
+                        message["from"] = "Server" # add this server's specific id 
+                        message["to"] = recipient
+                        message["ts"] = time.time()
+
+                        payload = data.get("payload", "") # TODO: Again, need to ensure payload format matches SOCP for encryption / decryption
+                        payload["sender"] = data.get("from", "")
+                        message["payload"] = payload
+
+                        await connected_clients[recipient].send(json.dumps(message))
+                        print(f'DEBUG: message to {recipient} from {data.get("from", "")} sent')
                     except:
                         cleanup_client(recipient)
                 else:
                     await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+
+                #add to group logic later 
+                # if recipient.lower() == "group":
+                #     # Send to local clients
+                #     for user, client_ws in list(connected_clients.items()):
+                #         if user != sender:
+                #             try:
+                #                 await client_ws.send(json.dumps(data))
+                #             except:
+                #                 cleanup_client(user)
+                #     # Forward to peers
+                #     for peer in peer_servers:
+                #         try:
+                #             async with websockets.connect(peer) as ws_peer:
+                #                 await ws_peer.send(json.dumps(data))
+                #         except:
+                #             pass
 
     except websockets.exceptions.ConnectionClosed:
         pass
