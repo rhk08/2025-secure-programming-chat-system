@@ -117,7 +117,7 @@ with open("bootstrap_servers.json", "r") as f:
 
 class Link:
     """Wrapper for WebSocket connections with metadata"""
-    def __init__(self, websocket, remote_id: str):
+    def __init__(self, websocket):
         self.websocket = websocket
         self.last_heartbeat = time.time()
         
@@ -274,18 +274,24 @@ class Server:
                     # Save bootstrap server
                     server_uuid = frame["from"]  # Fixed variable name
                     self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
-                    server_link = Link()
+                    server_link = Link(ws)
+                    self.server_addrs[server_link]
                     
                     # TODO servers -> Link
-                    
                     
                     # Save other servers
                     for client_server in frame["payload"].get("clients", []):
                         server_uuid = client_server["user_id"]
                         self.server_addrs[server_uuid] = (client_server["host"], client_server["port"], client_server["pubkey"])
-                        # TODO servers -> Link
+                    
                         
                         # TODO SERVER_ANNOUNCE
+                        
+                        
+                        
+                        # TODO servers -> Link
+                        
+                        
                     
                     self.selected_bootstrap_server = entry
                     
