@@ -5,6 +5,7 @@ import socket
 import time
 import signal
 import uuid
+from copy import deepcopy
 
 import sys
 
@@ -14,7 +15,6 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 
 import base64
-
 
 def generate_keys():
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
@@ -36,7 +36,6 @@ def generate_payload_signature(message: dict, private_key):
     Raises:
         ValueError: If 'payload' field is missing from the message.
     """
-    
     
     if 'payload' not in message:
         raise ValueError("Message does not contain a 'payload' field.")
@@ -96,6 +95,7 @@ def verify_payload_signature(message: dict, public_key):
         raise InvalidSignature("Signature verification failed.")
 
 
+
 """
 Every Protocol Message MUST have:
 [JSON]
@@ -115,21 +115,36 @@ with open("bootstrap_servers.json", "r") as f:
     BOOTSTRAP_SERVERS = json.load(f)
 # 
 
+class Link:
+    """Wrapper for WebSocket connections with metadata"""
+    def __init__(self, websocket, remote_id: str):
+        self.websocket = websocket
+        self.last_heartbeat = time.time()
+        
+    async def close(self):
+        await self.websocket.close()
+
 class Server:
-    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
-         # --- Server state ---
+    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
+        # --- Server state ---
         self.servers = {}           # server_id -> Link
-        self.server_addrs = {}      # server_id -> (host, port)
+        self.server_addrs = {}      # server_id -> (host, port, pubkey)
+        
         self.local_users = {}       # user_id -> Link
         self.user_locations = {}    # user_id -> "local" | f"server_{id}"
         
-        
-        
-        
+        # brought over from previous server implemetation
+        self.connected_clients = {}     # username -> websocket (local clients)
+        self.remote_users = {}          # username -> server_uri (remote users on peers)
+        self.client_public_keys = {}    # username -> public key (local clients)
+
+        with open("SOCP.json", 'r') as file:
+            self.JSON_base_template = json.load(file)
+
         self.host = host
         self.port = port
         self.server_uuid = str(uuid.uuid4())
-        
+        self.UDP_DISCOVERY_PORT = 9999
         
         # Pick one server randomly (or some strategy)
         selected = None
@@ -142,7 +157,6 @@ class Server:
                 raise ValueError(f"No matching introducer found for host={host}, port={port} in BOOTSTRAP_SERVERS")
         else:
             self.introducers = introducers or BOOTSTRAP_SERVERS
-            
             
         # --- Load keys ---
         if introducer_mode:
@@ -201,6 +215,26 @@ class Server:
             print(f"[{self.server_uuid}] Connection closed for {uri}")
         except Exception as e:
             print(f"[{self.server_uuid}] Error handling connection {uri}: {e}")
+    
+    # ---------------------- UDP Discovery ----------------------
+    async def udp_discovery_server(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(('', self.UDP_DISCOVERY_PORT))
+        loop = asyncio.get_event_loop()
+        print(f"[{self.server_uuid}] UDP discovery server running on port {self.UDP_DISCOVERY_PORT}")
+        try:
+            while True:
+                data, addr = await loop.run_in_executor(None, sock.recvfrom, 1024)
+                msg = data.decode()
+
+                if msg == "USER_ANNOUNCE":
+                    server_uri = f"ws://{socket.gethostbyname(socket.gethostname())}:{self.port}" # LAN ip
+                    sock.sendto(server_uri.encode(), addr)
+
+        except asyncio.CancelledError:
+            sock.close()
+            print(f"[{self.server_uuid}] UDP discovery server closed")
 
     async def bootstrap(self):
         for entry in self.introducers:
@@ -218,6 +252,7 @@ class Server:
                 )
                 self.tasks.append(message_handler_task)
                 
+                # New Server ---> Introducer
                 hello = {
                     "type": "SERVER_HELLO_JOIN",
                     "from": self.server_uuid,
@@ -239,7 +274,10 @@ class Server:
                     # Save bootstrap server
                     server_uuid = frame["from"]  # Fixed variable name
                     self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
+                    server_link = Link()
+                    
                     # TODO servers -> Link
+                    
                     
                     # Save other servers
                     for client_server in frame["payload"].get("clients", []):
@@ -276,6 +314,8 @@ class Server:
             
             async for msg in ws:
                 frame = json.loads(msg)
+                msg_type = frame.get("type")
+
                 print(f"[{self.server_uuid}] Received {frame['type']} from {frame['from']}")
                 
                 if self.introducer_mode and frame["type"] == "SERVER_HELLO_JOIN":
@@ -284,6 +324,7 @@ class Server:
                     
                     # TODO: Properly include array of known clients
                     
+                    # Introducer ---> New Server
                     welcome = {
                         "type": "SERVER_WELCOME",
                         "from": self.server_uuid,
@@ -310,7 +351,6 @@ class Server:
                 
                 
                 
-                
                 # TODO: Handle USER_ADVERTISE (update user_locations + gossip forward)
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
@@ -320,14 +360,78 @@ class Server:
 
                 # --- User ↔ Server TODOs ---
                 # TODO: Handle USER_HELLO (register local user, broadcast USER_ADVERTISE)
+                if msg_type == "USER_HELLO":
+                    
+                    client_id = str(uuid.uuid4())
+                    self.connected_clients[client_id] = ws
+                    payload = frame.get("payload", {})
+                    self.client_public_keys[client_id] = payload.get("pubkey")
+                    print(f"[{self.server_uuid}] Added {client_id} to client list")
+
+                    # message formatted to SOCP specifications
+                    message = deepcopy(self.JSON_base_template)
+                    message["type"] = "USER_WELCOME"
+                    message["from"] = "Server" 
+                    message["to"] = client_id
+                    message["ts"] = time.time()
+                    await ws.send(json.dumps(message))
+                    
+                    continue
+
                 # TODO: Handle MSG_DIRECT (wrap into SERVER_DELIVER or deliver locally)
+                """" 
+                
+                if msg_type == "MSG_DIRECT":
+                recipient
+                        payload = data.get("payload", "") # TODO: Again, need to ensure payload format matches SOCP for encryption / decryption
+                        payload["sender"] = data.get("from", "")
+                        message["payload"] = payload
+
+                        await connected_clients[recipient].send(json.dumps(message))
+                        print(f'DEBUG: message to {recipient} from {data.get("from", "")} sent')
+                    except:
+                        cleanup_client(recipient)
+                else:
+                    await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+
+                #add to group logic later 
+                # if recipient.lower() == "group":
+                #     # Send to local clients
+                #     for user, client_ws in list(connected_clients.items()):
+                #         if user != sender:
+                #             try:
+                #                 await client_ws.send(json.dumps(data))
+                #             except:
+                #                 cleanup_client(user)
+                #     # Forward to peers
+                #     for peer = data.get("to", "")
+                if recipient in connected_clients:
+                    try:
+                        # send message to specified client according to SOCP format 
+                        message = deepcopy(JSON_base_template)
+                        message["type"] = "USER_DELIVER"
+                        message["from"] = "Server" # add this server's specific id 
+                        message["to"] = recipient
+                        message["ts"] = time.time()
+ in peer_servers:
+                #         try:
+                #             async with websockets.connect(peer) as ws_peer:
+                #                 await ws_peer.send(json.dumps(data))
+                #         except:
+                #             pass
+
+                except websockets.exceptions.ConnectionClosed:
+                    pass
+                finally:
+                    if username:
+                        cleanup_client(username)
+
+                """
                 # TODO: Handle MSG_PUBLIC_CHANNEL (fan-out to members, maintain channel state)
                 # TODO: Handle FILE_START / FILE_CHUNK / FILE_END (forward chunks per §9.4)
                     
         except websockets.exceptions.ConnectionClosed:
             print(f"[{self.server_uuid}] Incoming connection closed from {uri}")
-
-
     
     async def wait_for_message(self, uri, expected_type):
         queue = self._incoming_responses[uri]
@@ -340,11 +444,44 @@ class Server:
                 await queue.put(raw)
                 await asyncio.sleep(0)
     
+         #implementation below
+        """
+    # TODO: Send HEARTBEAT frames every 15s to connected servers as above
+    async def send_heartbeat(self):
+        # TODO: send heartbeat to server (e.g., websocket.send(...))
+        print(">> Sending HEARTBEAT")
+        # Simulate ACK (in real code, update this when ACK is received from server)
+        asyncio.create_task(self.fake_server_ack())
+
+    async def fake_server_ack(self):
+        await asyncio.sleep(5)  # pretend server replies after 5s
+        self.last_heartbeat_ack = time.time()
+        print("<< Received HEARTBEAT ACK")
+
+    async def close_and_reconnect(self):
+        print("Connection lost! Closing and reconnecting...")
+        self.connected = False
+        await asyncio.sleep(2)  # simulate reconnect delay
+        self.connected = True
+        self.last_heartbeat_ack = time.time()
+        print("Reconnected.")
+
     async def heartbeat_loop(self):
-        # TODO: Send HEARTBEAT frames every 15s to connected servers
-        # TODO: Detect 45s timeout -> close and reconnect
-        return
-    
+        while True:
+            if not self.connected:
+                await asyncio.sleep(1)
+                continue
+
+            # Send heartbeat
+            await self.send_heartbeat()
+
+            # Wait 15s before sending the next one
+            await asyncio.sleep(15)
+
+            # Check for timeout (45s without ack)
+            if time.time() - self.last_heartbeat_ack > 45:
+                await self.close_and_reconnect()       
+        """
     
     async def shutdown(self):
             """Clean shutdown of all tasks and connections."""
@@ -371,18 +508,23 @@ class Server:
     
     async def start(self):
         print("1")
-        self.server_websocket = await websockets.serve(self.incoming_connection_handler, self.host, self.port)
-        
+        self.server_websocket = await websockets.serve(
+            self.incoming_connection_handler,
+            self.host,
+            self.port
+        )
+
         role = "INTRODUCER" if self.introducer_mode else "NORMAL"
         print(f"[{self.server_uuid}] Listening on {self.host}:{self.port} ({role})")
         
         if not self.introducer_mode:
             await self.bootstrap()
         
-        # TODO: Start heartbeat_loop as a background task
-        # self.tasks.append(asyncio.create_task(self.heartbeat_loop()))
 
         # TODO: Start user connection handler (separate from server connections)
+        # Start UDP discovery as background task
+        udp_task = asyncio.create_task(self.udp_discovery_server())
+        self.tasks.append(udp_task)
         
         # Wait for shutdown event instead of hanging forever
         await self._shutdown_event.wait()
@@ -393,7 +535,6 @@ class Server:
     #       - If local_users[user_id] → send USER_DELIVER
     #       - Else if user_locations[user_id] == server_id → send SERVER_DELIVER
     #       - Else → send ERROR(USER_NOT_FOUND)
-    
     
     # --- Database ---
     # TODO: Implement persistent database layer per §15
@@ -407,7 +548,7 @@ class Server:
     # TODO: Implement /tell <user> <text> → DM
     # TODO: Implement /all <text> → Public channel message
     # TODO: Implement /file <user> <path> → File transfer
-    
+
 async def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9000
     introducer_mode = "--intro" in sys.argv
