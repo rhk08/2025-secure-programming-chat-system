@@ -94,6 +94,20 @@ def verify_payload_signature(message: dict, public_key):
     except InvalidSignature:
         raise InvalidSignature("Signature verification failed.")
 
+# THESE ONLY WORK FOR PUBLIC KEYS -----------
+def encode_public_key_base64url(key_object):
+    PEM_encoded_key = key_object.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    base64url_encoded_key = base64.urlsafe_b64encode(PEM_encoded_key).decode("utf-8")
+    return base64url_encoded_key
+
+def decode_public_key_base64url(key_base64url):
+    decoded_key_object = serialization.load_pem_public_key(
+        base64.urlsafe_b64decode(key_base64url)
+    )
+    return decoded_key_object
 
 
 """
@@ -125,7 +139,7 @@ class Link:
         await self.websocket.close()
 
 class Server:
-    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
+    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)
@@ -191,6 +205,7 @@ class Server:
         self.introducer_mode = introducer_mode
         self.tasks = []                  # list of asyncio tasks
         self.server_websocket = None
+        self.udp_sock = None
         self._incoming_responses = {}  # uri -> asyncio.Queue()
         
         self._shutdown_event = asyncio.Event()
@@ -216,25 +231,30 @@ class Server:
         except Exception as e:
             print(f"[{self.server_uuid}] Error handling connection {uri}: {e}")
     
-    # ---------------------- UDP Discovery ----------------------
+    # ---------------------- UDP Discovery ----------------------               
     async def udp_discovery_server(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.bind(('', self.UDP_DISCOVERY_PORT))
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.udp_sock.bind(('', self.UDP_DISCOVERY_PORT))
         loop = asyncio.get_event_loop()
         print(f"[{self.server_uuid}] UDP discovery server running on port {self.UDP_DISCOVERY_PORT}")
+
         try:
             while True:
-                data, addr = await loop.run_in_executor(None, sock.recvfrom, 1024)
+                data, addr = await loop.run_in_executor(None, self.udp_sock.recvfrom, 1024)
                 msg = data.decode()
 
                 if msg == "USER_ANNOUNCE":
-                    server_uri = f"ws://{socket.gethostbyname(socket.gethostname())}:{self.port}" # LAN ip
-                    sock.sendto(server_uri.encode(), addr)
+                    server_uri = f"ws://{socket.gethostbyname(socket.gethostname())}:{self.port}"  # LAN ip
+                    self.udp_sock.sendto(server_uri.encode(), addr)
 
         except asyncio.CancelledError:
-            sock.close()
-            print(f"[{self.server_uuid}] UDP discovery server closed")
+            print(f"[{self.server_uuid}] UDP discovery server cancelled")
+            raise
+        finally:
+            if self.udp_sock:
+                self.udp_sock.close()
+                print(f"[{self.server_uuid}] UDP discovery server closed")
 
     async def bootstrap(self):
         for entry in self.introducers:
@@ -269,36 +289,85 @@ class Server:
                 
                 # Now wait_for_message will work because the incoming_connection_handler task is reading
                 frame = await self.wait_for_message(uri, expected_type="SERVER_WELCOME")
+                print("1")
                 
                 if frame["type"] == "SERVER_WELCOME":
+                    
+                    print("1")
+                    
                     # Save bootstrap server
-                    server_uuid = frame["from"]  # Fixed variable name
+                    server_uuid = frame["from"]
                     self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
                     server_link = Link(ws)
-                    self.server_addrs[server_link]
+                    self.servers[server_uuid] = server_link
                     
                     # TODO servers -> Link
+
+                    print("1")
                     
                     # Save other servers
                     for client_server in frame["payload"].get("clients", []):
+                        
+                        print("2")
+                        
                         server_uuid = client_server["user_id"]
-                        self.server_addrs[server_uuid] = (client_server["host"], client_server["port"], client_server["pubkey"])
-                    
+                        host = client_server["host"]
+                        port = client_server["port"]
+                        pubkey = client_server["pubkey"]
                         
-                        # TODO SERVER_ANNOUNCE
+                        # Record their address + pubkey
+                        self.server_addrs[server_uuid] = (host, port, pubkey)
                         
-                        
+                        # TODO: Establish links to all returned servers
+                        try:
+                            peer_uri = f"ws://{host}:{port}"
+                            if server_uuid not in self.servers:
+                                peer_ws = await websockets.connect(peer_uri)
+                                self.servers[server_uuid] = Link(peer_ws)
+                                # Start handler for this connection
+                                task = asyncio.create_task(
+                                    self.outgoing_connection_handler_handler(peer_ws, peer_uri)
+                                )
+                                self.tasks.append(task)
+                                print(f"[{self.server_uuid}] Linked to peer server {server_uuid} at {peer_uri}")
+                        except Exception as e:
+                            print(f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
+                                        
                         
                         # TODO servers -> Link
-                        
-                        
-                    
                     self.selected_bootstrap_server = entry
                     
-                    
+                    announce = {
+                        "type": "SERVER_ANNOUNCE",
+                        "from": self.server_uuid,
+                        "to": "*",
+                        "ts": int(time.time() * 1000),
+                        "payload": {
+                            "host": self.host,
+                            "port": self.port,
+                            "pubkey": self.public_key_base64url,
+                        },
+                        "sig": generate_payload_signature(
+                            {
+                                "payload": {
+                                    "host": self.host,
+                                    "port": self.port,
+                                    "pubkey": self.public_key_base64url,
+                                }
+                            },
+                            self.private_key,
+                        ),
+                    }
+                                        
                     # TODO: Send SERVER_ANNOUNCE to all servers after join
-                    # TODO: Establish links to all returned servers
-
+                    for server_uuid, link in self.servers.items():
+                        try:
+                            await link.websocket.send(json.dumps(announce))
+                            print(f"[{self.server_uuid}] Sent SERVER_ANNOUNCE to {server_uuid}")
+                        except Exception as e:
+                            print(f"[{self.server_uuid}] Failed to send SERVER_ANNOUNCE to {server_uuid}: {e}")
+                                    
+                    
                     break
                         
                 else:
@@ -324,11 +393,19 @@ class Server:
 
                 print(f"[{self.server_uuid}] Received {frame['type']} from {frame['from']}")
                 
-                if self.introducer_mode and frame["type"] == "SERVER_HELLO_JOIN":
+                if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
                     # Should check availability
                     assigned_id = frame["from"]
                     
                     # TODO: Properly include array of known clients
+                    clients_list = []
+                    for server_id, (host, port, pubkey) in self.server_addrs.items():
+                        clients_list.append({
+                            "user_id": server_id,
+                            "host": host,
+                            "port": port,
+                            "pubkey": pubkey
+                        })
                     
                     # Introducer ---> New Server
                     welcome = {
@@ -338,13 +415,7 @@ class Server:
                         "ts": int(time.time() * 1000),
                         "payload": {
                             "assigned_id": assigned_id,
-                            "clients": [
-                                
-                                {"user_id": self.server_uuid,
-                                "host": self.host,
-                                "port": self.port,
-                                "pubkey": self.public_key_base64url}
-                            ]
+                            "clients": clients_list
                         },
                         "sig": "..."
                     }
@@ -354,11 +425,65 @@ class Server:
                 
                 # --- Server ↔ Server TODOs ---
                 # TODO: Handle SERVER_ANNOUNCE (register new server + update server_addrs)
-                
-                
-                
+                if msg_type == "SERVER_ANNOUNCE":
+                    """ Expects
+                        { 
+                            "type":"SERVER_ANNOUNCE",
+                            "from":"server_id",
+                            "to":"*", // Broadcast to all servers on the network
+                            "ts":1700000000500,
+                            "payload":{
+                                "host" "A.B.C.D", // The Server's IP
+                                "port" 12345, // The Server's WS port
+                                "pubkey": "BASE64URL(RSA-4096-PUB)"
+                            },
+                            "sig":"..."
+                        }
+                                
+                    """
+                    print(f"[{self.server_uuid}] Recieved SERVER_ANNOUNCE, Implementation Required!")
+                    try:
+                        # --- Verify sender signature ---
+                        verify_payload_signature(frame, decode_public_key_base64url(
+                            frame["payload"]["pubkey"]
+                        ))
+                        
+                        server_uuid = frame["from"]
+                        host = frame["payload"]["host"]
+                        port = frame["payload"]["port"]
+                        pubkey = frame["payload"]["pubkey"]
+                        self.server_addrs[server_uuid] = (host, port, pubkey)
+                        
+                        try:
+                            peer_uri = f"ws://{host}:{port}"
+                            if server_uuid not in self.servers:
+                                peer_ws = await websockets.connect(peer_uri)
+                                self.servers[server_uuid] = Link(peer_ws)
+                                task = asyncio.create_task(
+                                    self.outgoing_connection_handler_handler(peer_ws, peer_uri)
+                                )
+                                self.tasks.append(task)
+                                print(f"[{self.server_uuid}] Linked to peer server {server_uuid} at {peer_uri}")
+                        except Exception as e:
+                            print(f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
+                        
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Failed to process SERVER_ANNOUNCE: {e}")
+                    
+                    continue
+                    
+            
                 # TODO: Handle USER_ADVERTISE (update user_locations + gossip forward)
+                if msg_type == "USER_ADVERTISE":
+                    print(f"[{self.server_uuid}] Recieved USER_ADVERTISE, Implementation Required")
+                    continue
+                
+                
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
+                if msg_type == "USER_REMOVE":
+                    print(f"[{self.server_uuid}] Recieved USER_REMOVE, Implementation Required")
+                    continue
+                
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
                 # TODO: Handle HEARTBEAT (update health state, maybe reply)
                 # TODO: Handle ACK (log/track successful delivery)
@@ -489,31 +614,68 @@ class Server:
                 await self.close_and_reconnect()       
         """
     
+    async def debug_loop(self, delay=5):
+        """Periodically print all known servers for debugging."""
+        try:
+            while not self._shutdown_event.is_set():
+                print(f"[{self.server_uuid}] --- Server state ---")
+            
+                # Print Links
+                print("Servers (Links):")
+                if self.servers:
+                    for server_id, link in self.servers.items():
+                        # If Link has useful attributes, print them
+                        link_info = repr(link)  # or f"{link.host}:{link.port}" if those exist
+                        print(f"  {server_id}: {link_info}")
+                else:
+                    print("  (no servers)")
+
+                # Print server addresses (host, port, pubkey)
+                print("Server addresses:")
+                if self.server_addrs:
+                    for server_id, addr in self.server_addrs.items():
+                        host, port, pubkey = addr
+                        print(f"  {server_id}: host={host}, port={port}, pubkey={pubkey[:10]}...")  # show only first 10 chars
+                else:
+                    print("  (no server addresses)")
+
+                print("-" * 60)
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            print(f"[{self.server_uuid}] Debug loop cancelled")
+            raise
+
+    
     async def shutdown(self):
-            """Clean shutdown of all tasks and connections."""
-            print(f"[{self.server_uuid}] Shutting down server...")
-            
-            # Signal shutdown
-            self._shutdown_event.set()
-            
-            # Cancel all background tasks
-            for task in self.tasks:
-                if not task.done():
-                    task.cancel()
-            
-            # Wait for tasks to complete
-            if self.tasks:
-                await asyncio.gather(*self.tasks, return_exceptions=True)
-            
-            # Close server websocket
-            if self.server_websocket:
-                self.server_websocket.close()
-                await self.server_websocket.wait_closed()
-            
-            print(f"[{self.server_uuid}] Shutdown complete")
+        """Clean shutdown of all tasks and connections."""
+        print(f"[{self.server_uuid}] Shutting down server...")
+
+        # Signal shutdown
+        self._shutdown_event.set()
+
+        # Cancel all background tasks
+        for task in self.tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for tasks to complete
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+
+        # Close UDP socket if still open
+        if self.udp_sock:
+            try:
+                self.udp_sock.close()
+            except Exception as e:
+                print(f"[{self.server_uuid}] Error closing UDP socket: {e}")
+            self.udp_sock = None
+
+        # Close server websocket
+        if self.server_websocket:
+            self.server_websocket.close()
+            await self.server_websocket.wait_closed()
     
     async def start(self):
-        print("1")
         self.server_websocket = await websockets.serve(
             self.incoming_connection_handler,
             self.host,
@@ -531,6 +693,9 @@ class Server:
         # Start UDP discovery as background task
         udp_task = asyncio.create_task(self.udp_discovery_server())
         self.tasks.append(udp_task)
+        debug_loop = asyncio.create_task(self.debug_loop())
+        self.tasks.append(udp_task)
+        
         
         # Wait for shutdown event instead of hanging forever
         await self._shutdown_event.wait()
@@ -572,6 +737,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         # This catches KeyboardInterrupt that might escape the main() function
-        print("\nShutdown complete.")
+        print("\nShutdown complete.\n")
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}")
