@@ -7,6 +7,7 @@ import signal
 import uuid
 from copy import deepcopy
 
+from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 import sys
 
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -139,10 +140,11 @@ class Link:
         await self.websocket.close()
 
 class Server:
-    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
+    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)
+        self.servers_websockets = {}           # u -> server_id
         
         self.local_users = {}       # user_id -> Link
         self.user_locations = {}    # user_id -> "local" | f"server_{id}"
@@ -306,6 +308,7 @@ class Server:
                     self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
                     server_link = Link(ws)
                     self.servers[server_uuid] = server_link
+                    self.servers_websockets[ws] = server_uuid
                     
                     # TODO servers -> Link
 
@@ -321,9 +324,7 @@ class Server:
                         port = client_server["port"]
                         pubkey = client_server["pubkey"]
                         
-                        # Record their address + pubkey
-                        self.server_addrs[server_uuid] = (host, port, pubkey)
-                        
+    
                         # TODO: Establish links to all returned servers
                         try:
                             peer_uri = f"ws://{host}:{port}"
@@ -336,9 +337,13 @@ class Server:
                                 )
                                 self.tasks.append(task)
                                 print(f"[{self.server_uuid}] Linked to peer server {server_uuid} at {peer_uri}")
+                                
+                                 # Record their address + pubkey
+                                self.server_addrs[server_uuid] = (host, port, pubkey)
+                                self.servers_websockets[ws] = server_uuid
                         except Exception as e:
                             print(f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
-                                        
+                            
                         
                         # TODO servers -> Link
                     self.selected_bootstrap_server = entry
@@ -388,11 +393,11 @@ class Server:
     # Updated incoming_connection_handler for incoming connections (servers connecting to us)
     async def incoming_connection_handler(self, ws):
         """Handle incoming websocket connections (servers connecting to this server)."""
-        try:
-            # You might want to determine the URI for this connection for queue management
-            remote_host, remote_port = ws.remote_address
-            uri = f"ws://{remote_host}:{remote_port}"
-            
+        remote_host, remote_port = ws.remote_address
+        uri = f"ws://{remote_host}:{remote_port}"
+    
+        
+        try:            
             async for msg in ws:
                 frame = json.loads(msg)
                 msg_type = frame.get("type")
@@ -458,7 +463,7 @@ class Server:
                         host = frame["payload"]["host"]
                         port = frame["payload"]["port"]
                         pubkey = frame["payload"]["pubkey"]
-                        self.server_addrs[server_uuid] = (host, port, pubkey)
+                        
                         
                         try:
                             peer_uri = f"ws://{host}:{port}"
@@ -470,6 +475,10 @@ class Server:
                                 )
                                 self.tasks.append(task)
                                 print(f"[{self.server_uuid}] Linked to peer server {server_uuid} at {peer_uri}")
+                                
+                                self.server_addrs[server_uuid] = (host, port, pubkey)
+                                self.servers_websockets[ws] = server_uuid
+                                
                         except Exception as e:
                             print(f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
                         
@@ -599,9 +608,24 @@ class Server:
 
                     await ws.send(json.dumps(message_json))
                     continue
-                    
+        
+        except ConnectionClosedOK:
+        # This happens when .close() is called and shutdown is clean
+            print(f"[{self.server_uuid}] Graceful close detected from {uri}")
+        
         except websockets.exceptions.ConnectionClosed:
             print(f"[{self.server_uuid}] Incoming connection closed from {uri}")
+            
+        finally:
+            server_uuid = self.servers_websockets.pop(ws, None)
+            if server_uuid:
+                # Remove live connection
+                self.servers.pop(server_uuid, None)
+                # Remove metadata
+                self.server_addrs.pop(server_uuid, None)
+
+            print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
+        
     
     async def wait_for_message(self, uri, expected_type):
         queue = self._incoming_responses[uri]
@@ -678,6 +702,8 @@ class Server:
                 else:
                     print("  (no server addresses)")
 
+                # 
+                
                 print("-" * 60)
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -733,7 +759,7 @@ class Server:
         udp_task = asyncio.create_task(self.udp_discovery_server())
         self.tasks.append(udp_task)
         debug_loop = asyncio.create_task(self.debug_loop())
-        self.tasks.append(udp_task)
+        self.tasks.append(debug_loop)
         
         
         # Wait for shutdown event instead of hanging forever
