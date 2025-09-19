@@ -4,9 +4,9 @@ import json
 import socket
 import base64
 from datetime import datetime
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import AES, PKCS1_OAEP
-from Crypto.Random import get_random_bytes 
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.exceptions import InvalidSignature
 from copy import deepcopy
 import time 
 
@@ -18,9 +18,21 @@ class Client:
         self.websocket = None
         self.client_id = "Guest"
         self._pending_key_requests = {}
-        self.rsa_key = RSA.generate(2048)
-        self.private_key = self.rsa_key
-        self.public_key = self.rsa_key.publickey()
+
+        # generate keys using cryptography library (same as server)
+        self.private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048
+        )
+        self.public_key = self.private_key.public_key()
+        
+        # export in PEM format
+        public_key_pem = self.public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode('utf-8')
+
         self.server_uri = None
         self._incoming_responses = asyncio.Queue()
         
@@ -49,14 +61,120 @@ class Client:
         finally:
             sock.close()
 
-    # ---------------- RSA/AES encryption ----------------
-    async def encrypt_message(self, message):
-        # TODO
-        return message
+    # ---------------- RSA encryption ----------------
+    async def encrypt_message(self, message, recipient_pubkey_b64url):
+        pem_bytes = base64.urlsafe_b64decode(recipient_pubkey_b64url.encode("utf-8"))
+        recipient_pubkey = serialization.load_pem_public_key(pem_bytes)
+        
+        ciphertext = recipient_pubkey.encrypt(
+            message.encode("utf-8"),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return base64.b64encode(ciphertext).decode("utf-8")
 
-    async def decrypt_message(self, message):
-        # TODO
-        return message
+    # ---------------- RSA decryption ----------------
+    async def decrypt_message(self, encrypted_message_b64):
+        ciphertext = base64.b64decode(encrypted_message_b64)
+        plaintext = self.private_key.decrypt(
+            ciphertext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return plaintext.decode("utf-8")
+    
+    # ---------------- Create message signature ----------------
+    async def sign_message(self, sender_privkey, ciphertext, sender_id, recipient_id, timestamp):
+        # ensure timestamp is consistent (6 decimal places)
+        ts_str = f"{timestamp:.6f}"
+
+        # Concatenate string exactly the same way for signing and verification
+        sign_data = f"{ciphertext}|{sender_id}|{recipient_id}|{ts_str}".encode('utf-8')
+
+        signature = sender_privkey.sign(
+            sign_data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+
+        signature_b64url = base64.urlsafe_b64encode(signature).decode('utf-8')
+
+        # print("\n[! DEBUG] --- Signing Message ---")
+        # print(f"Sender UUID: {self.client_id}")
+        # print(f"Recipient UUID: {recipient_id}")
+        # print(f"Timestamp: {timestamp}")
+        # print(f"Ciphertext: {ciphertext}")
+        # sign_data = f"{ciphertext}|{self.client_id}|{recipient_id}|{timestamp:.6f}".encode('utf-8')
+        # print(f"Signing bytes: {sign_data}")
+        # print(f"Signature (b64url): {signature_b64url}")
+
+        return signature_b64url
+
+    # ---------------- Verify message signature ----------------
+    async def verify_message(self, msg_direct):
+        try:
+            payload = msg_direct.get("payload", {})
+            ciphertext = payload.get("ciphertext")
+            signature_b64url = payload.get("content_sig")
+            sender_pubkey_b64url = payload.get("sender_pub")
+            sender = payload.get("sender")
+            recipient = msg_direct.get("to")
+            ts = float(msg_direct.get("ts"))  # ensure float
+
+            if not (ciphertext and signature_b64url and sender_pubkey_b64url):
+                print("[! DEBUG ] missing ciphertext, signature, or sender_pub")
+                return False
+
+            # decode sender pub key
+            pem_bytes = base64.urlsafe_b64decode(sender_pubkey_b64url)
+            sender_pubkey_obj = serialization.load_pem_public_key(pem_bytes)
+
+            # reconstruct signed string 
+            ts_str = f"{ts:.6f}"
+            sign_data = f"{ciphertext}|{sender}|{recipient}|{ts_str}".encode('utf-8')
+
+            # decode signature
+            signature = base64.urlsafe_b64decode(signature_b64url)
+
+            # DEBUG OUTPUT
+            # print("\n[! DEBUG] --- Signature Verification ---")
+            # print(f"Sender UUID: {sender}")
+            # print(f"Recipient UUID: {recipient}")
+            # print(f"Timestamp (float): {ts}")
+            # print(f"Timestamp string: {ts_str}")
+            # print(f"Ciphertext: {ciphertext}")
+            # print(f"Reconstructed signed bytes: {sign_data}")
+            # print(f"Signature (b64url): {signature_b64url}")
+            # print(f"Signature bytes: {signature}")
+            
+            # verify
+            sender_pubkey_obj.verify(
+                signature,
+                sign_data,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            return True
+
+        except InvalidSignature:
+            print("[! DEBUG] Signature INVALID!")
+            return False
+        except Exception as e:
+            print(f"[! DEBUG] Verification error: {e}")
+            return False
+
     
     # ---------------- Sign-in ----------------
     async def signin(self):
@@ -70,9 +188,10 @@ class Client:
             message["ts"] = time.time()
             message["payload"] = {
                 "client": "cli-v1",
-                "pubkey": base64.b64encode(self.public_key.export_key()).decode(),
-                "enc_pubkey": base64.b64encode(self.public_key.export_key()).decode()
+                "pubkey": self.public_key_base64url,
+                "enc_pubkey": self.public_key_base64url
             }
+
             await self.websocket.send(json.dumps(message))
             
             response = json.loads(await self.websocket.recv())
@@ -119,36 +238,32 @@ class Client:
                 msg = json.loads(json_message)
             
                 # If this is a public key response, put it in the queue
-                if msg.get("type") == "Public Key":
+                if msg.get("type") == "PUB_KEY":
                     await self._incoming_responses.put(msg)
-                elif msg.get("type") == "pong":
-                    await self._incoming_responses.put(msg)
-                elif msg.get("type") == "user_list":
-                    await self._incoming_responses.put(msg)
+                # elif msg.get("type") == "pong":
+                #     await self._incoming_responses.put(msg)
+                # elif msg.get("type") == "user_list":
+                #     await self._incoming_responses.put(msg)
                 else:
                     # handle chat, heartbeat, etc
                     if msg['type'] == "USER_DELIVER":
-                        plaintext = await self.decrypt_message(msg)
-                        """
-                        {
-                            'type': 'chat', 
-                            'recipient': 'Bob', 
-                            'sender': 'Alice', 
-                            'timestamp': '2025-09-16 02:23:18', 
-                            *encryption info
-                        }
-                        """
                         
-                        if plaintext:
-                            self.store_message(msg, plaintext)
-                            # unread_count = self.unread_messages.get(msg["sender"], 0)
-                            # if unread_count > 0:
-                            #     print(f"\n[!] Message received from {msg['sender']} ({unread_count} unread)")
-                            # else:
-                            print(f"\n[!] Message: {plaintext} received from {msg['payload']['sender']}")
-                            print(f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
+                        print("message received !!")
+                        if await self.verify_message(msg):
                             
-                                
+                            payload = msg.get("payload")
+                            ciphertext = payload.get("ciphertext")
+
+                            if ciphertext:
+                                plaintext = await self.decrypt_message(ciphertext)
+                                self.store_message(msg, plaintext)
+                                print(f"\n[!] Message received from {msg.get('from')}:")
+                                print(plaintext)
+                                print(f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
+
+                            else:
+                                print("[! DEBUG] Message received but signature verification failed")
+                                     
                     elif msg["type"] == "heartbeat":
                         await self.websocket.send(json.dumps({"type": "heartbeat_ack", "sender": self.client_id}))
         except websockets.exceptions.ConnectionClosed:
@@ -197,36 +312,39 @@ class Client:
 
             # ----- Ping -----
             elif cmd == "ping":
-                await self.websocket.send(json.dumps({"type": "ping", "sender": self.client_id}))
+                print("[i] feature not yet available")
+                # await self.websocket.send(json.dumps({"type": "ping", "sender": self.client_id}))
 
-                # Wait for pong
-                while True:
-                    msg = await self._incoming_responses.get()
-                    if msg.get("type") == "pong":
-                        print(f"[i] Server response: {msg.get('content', 'Pong!')}")
-                        break
-                continue
+                # # Wait for pong
+                # while True:
+                #     msg = await self._incoming_responses.get()
+                #     if msg.get("type") == "pong":
+                #         print(f"[i] Server response: {msg.get('content', 'Pong!')}")
+                #         break
+                # continue
 
             # ----- List Users -----
             elif cmd == "list":
-                await self.websocket.send(json.dumps({"type": "list_users", "sender": self.client_id}))
+                print("[i] feature not yet available")
 
-                # Wait for user_list
-                while True:
-                    msg = await self._incoming_responses.get()
-                    if msg.get("type") == "user_list":
-                        users = msg.get("content", [])
-                        if users:
-                            print("[i] Connected users:")
-                            for u in users:
-                                if u == self.client_id:
-                                    print(f"  - {u} (That's You!)")
-                                else:
-                                    print(f"  - {u}")
-                        else:
-                            print("[i] No users currently connected.")
-                        break
-                continue
+                # await self.websocket.send(json.dumps({"type": "list_users", "sender": self.client_id}))
+
+                # # Wait for user_list
+                # while True:
+                #     msg = await self._incoming_responses.get()
+                #     if msg.get("type") == "user_list":
+                #         users = msg.get("content", [])
+                #         if users:
+                #             print("[i] Connected users:")
+                #             for u in users:
+                #                 if u == self.client_id:
+                #                     print(f"  - {u} (That's You!)")
+                #                 else:
+                #                     print(f"  - {u}")
+                #         else:
+                #             print("[i] No users currently connected.")
+                #         break
+                # continue
             
             # ----- History -----
             elif cmd == "history":
@@ -281,48 +399,64 @@ class Client:
                 recipient = cmd_parts[1]
                 message = cmd_parts[2]
 
-                # Request recipient's public key
-                #message_json = deepcopy(self.JSON_base_template)
-                # TODO: Can't currently see any JSON for retrieving public keys in SOCP??
-
-                await self.websocket.send(json.dumps({
-                    "type": "public_key_request",
-                    "recipient": recipient,
-                    "sender": self.client_id
-                }))
-
-                # Wait for key
-                pub_key = None
-                while True:
-                    msg = await self._incoming_responses.get()
-                    if msg.get("type") == "Public Key" and msg.get("sender") == recipient:
-                        pub_key = msg.get("content")
-                        break
-
-                if not pub_key:
-                    print(f"[!] Cannot obtain public key for {recipient}")
+                if recipient == 'Group':
+                    print("[i] Group messaging to be implemented")
                     continue
-
-                #modified
-                pub_key = base64.b64decode(pub_key)
-
-                # Encrypt and send
-                enc_data = await self.encrypt_message(message, pub_key)
-
-                message_json = deepcopy(self.JSON_base_template)
-                message_json['type'] = "MSG_DIRECT"
-                message_json['from'] = self.client_id
-                message_json['to'] = recipient
-                message_json['ts'] = time.time()
-                message_json['payload'] = enc_data   
-
-                self.store_message(message_json, message)
                 
-                await self.websocket.send(json.dumps(message_json))
-                print("[i] Message sent successfully!")
-                continue
+                else:
+                    # request recipient's public key
+                    pubkey_request = deepcopy(self.JSON_base_template)
+                    pubkey_request['type'] = "PUB_KEY_REQUEST"
+                    pubkey_request['from'] = self.client_id
+                    pubkey_request['to'] = "Server"
+                    pubkey_request['ts'] = time.time()
+                    pubkey_request['payload'] = {
+                        "recipient_uuid": recipient
+                        }
+                    await self.websocket.send(json.dumps(pubkey_request))
 
-            # ----- Unknown command / treat as chat -----
+                    # wait for PUB_KEY response 
+                    recipient_pubkey_b64url = None
+                    while True:
+                        msg = await self._incoming_responses.get()
+                        payload = msg.get("payload", {})
+                        if msg.get("type") == "PUB_KEY" and payload.get("recipient_uuid") == recipient:
+                            recipient_pubkey_b64url = payload.get("recipient_pub")
+                            break
+
+                    if not recipient_pubkey_b64url:
+                        print(f"[!] Cannot obtain public key for {recipient}")
+                        continue
+
+                    # encrypt the message
+                    encrypted_payload = await self.encrypt_message(message, recipient_pubkey_b64url)
+                    timestamp = int(time.time() * 1000)
+
+                    signature_b64url = await self.sign_message(
+                        self.private_key,
+                        encrypted_payload,
+                        self.client_id,
+                        recipient,
+                        timestamp
+                    )
+
+                    # send MSG_DIRECT
+                    msg_direct = deepcopy(self.JSON_base_template)
+                    msg_direct['type'] = "MSG_DIRECT"
+                    msg_direct['from'] = self.client_id
+                    msg_direct['to'] = recipient
+                    msg_direct['ts'] = timestamp
+                    msg_direct['payload'] = {
+                        "ciphertext": encrypted_payload,
+                        "sender_pub": self.public_key_base64url,
+                        "content_sig": signature_b64url
+                    }
+
+                    self.store_message(msg_direct, message)  # store plaintext locally
+                    await self.websocket.send(json.dumps(msg_direct))
+                    print("[i] Message sent successfully!")
+
+            # ----- Unknown command -----
             else:
                 print("[!] Unknown command. Type 'help' for a list of commands.")
                 continue

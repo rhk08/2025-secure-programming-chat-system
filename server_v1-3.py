@@ -198,6 +198,12 @@ class Server:
         
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port}")
 
+    async def cleanup_client(self, username):
+        self.connected_clients.pop(username, None)
+        self.client_public_keys.pop(username, None)
+        print(f"[-] Removed client: {username}")
+        # TODO: Notify peers
+
     async def outgoing_connection_handler_handler(self, ws, uri):
         """Handle incoming messages for an outgoing websocket connection."""
         try:
@@ -235,7 +241,7 @@ class Server:
         except asyncio.CancelledError:
             sock.close()
             print(f"[{self.server_uuid}] UDP discovery server closed")
-
+    
     async def bootstrap(self):
         for entry in self.introducers:
             uri = f"ws://{entry['host']}:{entry['port']}"
@@ -277,14 +283,12 @@ class Server:
                     server_link = Link(ws)
                     self.server_addrs[server_link]
                     
-                    # TODO servers -> Link
-                    
                     # Save other servers
                     for client_server in frame["payload"].get("clients", []):
                         server_uuid = client_server["user_id"]
                         self.server_addrs[server_uuid] = (client_server["host"], client_server["port"], client_server["pubkey"])
                     
-                        
+
                         # TODO SERVER_ANNOUNCE
                         
                         
@@ -355,10 +359,8 @@ class Server:
                 # --- Server ↔ Server TODOs ---
                 # TODO: Handle SERVER_ANNOUNCE (register new server + update server_addrs)
                 
-                
-                
                 # TODO: Handle USER_ADVERTISE (update user_locations + gossip forward)
-                # TODO: Handle USER_REMOVE (remove user if mapping matches)
+                # TODO: Handle USER_REMOVE (remove user if mapping matches) !!
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
                 # TODO: Handle HEARTBEAT (update health state, maybe reply)
                 # TODO: Handle ACK (log/track successful delivery)
@@ -369,9 +371,17 @@ class Server:
                 if msg_type == "USER_HELLO":
                     
                     client_id = str(uuid.uuid4())
-                    self.connected_clients[client_id] = ws
                     payload = frame.get("payload", {})
+
+                    #old
+                    self.connected_clients[client_id] = ws
+
                     self.client_public_keys[client_id] = payload.get("pubkey")
+
+                    #new
+                    self.local_users[client_id] = Link(ws)
+                    self.user_locations[client_id] = "local"
+
                     print(f"[{self.server_uuid}] Added {client_id} to client list")
 
                     # message formatted to SOCP specifications
@@ -381,60 +391,84 @@ class Server:
                     message["to"] = client_id
                     message["ts"] = time.time()
                     await ws.send(json.dumps(message))
+
+                    #TODO: USER_ADVERTISE TO OTHER SERVERS
                     
                     continue
 
                 # TODO: Handle MSG_DIRECT (wrap into SERVER_DELIVER or deliver locally)
-                """" 
-                
                 if msg_type == "MSG_DIRECT":
-                recipient
-                        payload = data.get("payload", "") # TODO: Again, need to ensure payload format matches SOCP for encryption / decryption
-                        payload["sender"] = data.get("from", "")
-                        message["payload"] = payload
+                    recipient = frame.get("to", "")
+                    sender = frame.get("from", "")
 
-                        await connected_clients[recipient].send(json.dumps(message))
-                        print(f'DEBUG: message to {recipient} from {data.get("from", "")} sent')
-                    except:
-                        cleanup_client(recipient)
-                else:
-                    await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                    if sender not in self.user_locations:
+                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
 
-                #add to group logic later 
-                # if recipient.lower() == "group":
-                #     # Send to local clients
-                #     for user, client_ws in list(connected_clients.items()):
-                #         if user != sender:
-                #             try:
-                #                 await client_ws.send(json.dumps(data))
-                #             except:
-                #                 cleanup_client(user)
-                #     # Forward to peers
-                #     for peer = data.get("to", "")
-                if recipient in connected_clients:
-                    try:
-                        # send message to specified client according to SOCP format 
-                        message = deepcopy(JSON_base_template)
-                        message["type"] = "USER_DELIVER"
-                        message["from"] = "Server" # add this server's specific id 
-                        message["to"] = recipient
-                        message["ts"] = time.time()
- in peer_servers:
-                #         try:
-                #             async with websockets.connect(peer) as ws_peer:
-                #                 await ws_peer.send(json.dumps(data))
-                #         except:
-                #             pass
+                    elif self.user_locations[recipient] == "local":
+                        try:
+                            # send message to specified client according to SOCP format 
+                            message = deepcopy(self.JSON_base_template)
+                            message["type"] = "USER_DELIVER"
+                            message["from"] = self.server_uuid
+                            message["to"] = recipient
+                            message["ts"] = frame.get("ts")
 
-                except websockets.exceptions.ConnectionClosed:
-                    pass
-                finally:
-                    if username:
-                        cleanup_client(username)
+                            payload = frame.get("payload", "")
+                            payload["sender"] = sender
+                            message["payload"] = payload
 
-                """
+                            await self.connected_clients[recipient].send(json.dumps(message))
+                            print(f'DEBUG: message to {recipient} from {sender} sent')
+
+                        except:
+                            await self.cleanup_client(recipient)
+
+                    # user is not local, forward to other server YET TO TEST
+                    else:
+                        try:
+                            recipient = self.user_locations[recipient]
+                            # send message to specified client according to SOCP format 
+                            message = deepcopy(self.JSON_base_template)
+                            message["type"] = "SERVER_DELIVER"
+                            message["from"] = self.server_uuid
+                            message["to"] = recipient
+                            message["ts"] = time.time()
+
+                            payload = frame.get("payload", "")
+
+                            if not isinstance(payload, dict):
+                                payload = {"content": payload}
+                            payload["sender"] = sender
+                            message["payload"] = payload
+
+                            await self.connected_clients[recipient].send(json.dumps(message))
+                            print(f'DEBUG: message to {recipient} from {sender} sent')
+
+                        except:
+                            await self.cleanup_client(recipient)
+                        
                 # TODO: Handle MSG_PUBLIC_CHANNEL (fan-out to members, maintain channel state)
                 # TODO: Handle FILE_START / FILE_CHUNK / FILE_END (forward chunks per §9.4)
+
+                # RSA public key request
+                if msg_type == "PUB_KEY_REQUEST":
+                    payload = frame.get("payload")
+                    target = payload.get("recipient_uuid")
+
+                    pub_key = self.client_public_keys.get(target)
+
+                    message_json = deepcopy(self.JSON_base_template)
+                    message_json['type'] = "PUB_KEY"
+                    message_json['from'] = self.server_uuid
+                    message_json['to'] = frame.get("from")
+                    message_json['ts'] = time.time()
+                    message_json['payload'] = {
+                        "recipient_pub": pub_key,
+                        "recipient_uuid": target
+                    }
+
+                    await ws.send(json.dumps(message_json))
+                    continue
                     
         except websockets.exceptions.ConnectionClosed:
             print(f"[{self.server_uuid}] Incoming connection closed from {uri}")
