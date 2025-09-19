@@ -139,7 +139,7 @@ class Link:
         await self.websocket.close()
 
 class Server:
-    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
+    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)
@@ -530,7 +530,7 @@ class Server:
                     recipient = frame.get("to", "")
                     sender = frame.get("from", "")
 
-                    if sender not in self.user_locations:
+                    if recipient not in self.user_locations:
                         await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
 
                     elif self.user_locations[recipient] == "local":
@@ -546,7 +546,8 @@ class Server:
                             payload["sender"] = sender
                             message["payload"] = payload
 
-                            await self.connected_clients[recipient].send(json.dumps(message))
+                            #await self.connected_clients[recipient].send(json.dumps(message))
+                            await self.local_users[recipient].websocket.send(json.dumps(message))
                             print(f'DEBUG: message to {recipient} from {sender} sent')
 
                         except:
