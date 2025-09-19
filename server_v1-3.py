@@ -238,6 +238,12 @@ class Server:
             print(f"[{self.server_uuid}] Connection closed for {uri}")
         except Exception as e:
             print(f"[{self.server_uuid}] Error handling connection {uri}: {e}")
+        finally:
+            server_uuid = self.servers_websockets.pop(ws, None)
+            if server_uuid:
+                self.servers.pop(server_uuid, None)
+                self.server_addrs.pop(server_uuid, None)
+                print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
     
     # ---------------------- UDP Discovery ----------------------               
     async def udp_discovery_server(self):
