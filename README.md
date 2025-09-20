@@ -20,17 +20,23 @@
 ## 3. Install dependencies
     pip install -r requirements.txt
 
+## 4. Update bootstrap_servers.json
+    Modify the bootstrap_servers.json file to include the ip addresses and port numbers of servers to connect to via bootstrap.
 
 ## Running the Server
 Start the P2P server with:
 
-    python serverP2P.py
+    python server_v1-3.py [port number]
+
+To run the server as the introducer, use:
+
+    python server_v1-3.py [port number] --intro
 
 ## Running the Client
 
 Start the P2P client with:
 
-    python clientP2P.py
+    python client_v1-3.py
 
 Enter your username when prompted.
 
