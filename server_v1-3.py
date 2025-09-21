@@ -430,8 +430,16 @@ class Server:
                 self.udp_sock.close()
                 print(f"[{self.server_uuid}] UDP discovery server closed")
     
-    
-    
+    async def heartbeat_loop(self, delay=15):
+        """Periodically send a frame to all servers to check if they are still alive"""
+        try:
+            while not self._shutdown_event.is_set():
+                
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            print(f"[{self.server_uuid}] Heartbeat loop cancelled")
+            raise
+
     async def debug_loop(self, delay=5):
         """Periodically print all known servers for debugging."""
         try:
@@ -465,7 +473,6 @@ class Server:
             print(f"[{self.server_uuid}] Debug loop cancelled")
             raise
 
-    
     
     
     
@@ -519,6 +526,8 @@ class Server:
         self.tasks.append(udp_task)
         debug_loop = asyncio.create_task(self.debug_loop())
         self.tasks.append(debug_loop)
+        heartbeat_loop = asyncio.create_task(self.heartbeat_loop())
+        self.tasks.append(heartbeat_loop)
         
         
         # Wait for shutdown event instead of hanging forever
