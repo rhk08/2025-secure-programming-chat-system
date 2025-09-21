@@ -38,7 +38,7 @@ class Server:
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)
-        self.servers_websockets = {}           # u -> server_id
+        self.servers_websockets = {} # websocket -> server_id
         
         self.local_users = {}       # user_id -> Link
         self.user_locations = {}    # user_id -> "local" | f"server_{id}"
@@ -320,47 +320,6 @@ class Server:
                 self.server_addrs.pop(server_uuid, None)
 
             print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
-        
-    
-        """
-    # TODO: Send HEARTBEAT frames every 15s to connected servers as above
-    async def send_heartbeat(self):
-        # TODO: send heartbeat to server (e.g., websocket.send(...))
-        print(">> Sending HEARTBEAT")
-        # Simulate ACK (in real code, update this when ACK is received from server)
-        asyncio.create_task(self.fake_server_ack())
-
-    async def fake_server_ack(self):
-        await asyncio.sleep(5)  # pretend server replies after 5s
-        self.last_heartbeat_ack = time.time()
-        print("<< Received HEARTBEAT ACK")
-
-    async def close_and_reconnect(self):
-        print("Connection lost! Closing and reconnecting...")
-        self.connected = False
-        await asyncio.sleep(2)  # simulate reconnect delay
-        self.connected = True
-        self.last_heartbeat_ack = time.time()
-        print("Reconnected.")
-
-    async def heartbeat_loop(self):
-        while True:
-            if not self.connected:
-                await asyncio.sleep(1)
-                continue
-
-            # Send heartbeat
-            await self.send_heartbeat()
-
-            # Wait 15s before sending the next one
-            await asyncio.sleep(15)
-
-            # Check for timeout (45s without ack)
-            if time.time() - self.last_heartbeat_ack > 45:
-                await self.close_and_reconnect()       
-        """
-    
-       
     
     async def handle_server_hello_join(self, frame, ws):
         """Handle a SERVER_HELLO_JOIN message when acting as introducer."""
@@ -702,11 +661,6 @@ class Server:
     #       - store profiles, public channel state
     #       - enforce NAME_IN_USE, BAD_KEY, INVALID_SIG, etc.
 
-    # --- Client commands ---
-    # TODO: Implement /list → return known online users
-    # TODO: Implement /tell <user> <text> → DM
-    # TODO: Implement /all <text> → Public channel message
-    # TODO: Implement /file <user> <path> → File transfer
 
 async def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9000
