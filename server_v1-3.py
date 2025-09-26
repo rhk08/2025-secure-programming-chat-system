@@ -113,7 +113,28 @@ class Server:
         self.connected_clients.pop(username, None)
         self.client_public_keys.pop(username, None)
         print(f"[-] Removed client: {username}")
-        # TODO: Notify peers
+
+        # TODO: Notify peers USER_REMOVE to other servers
+        user_remove_message = deepcopy(self.JSON_base_template)
+        user_remove_message["type"] = "USER_REMOVE"
+        user_remove_message["from"] = self.server_uuid 
+        user_remove_message["to"] = "*"
+        user_remove_message["ts"] = time.time()
+        user_remove_message["payload"] = {
+            "user_id": username,
+            "server_id": self.server_uuid,
+        }
+        # TODO: add sig
+                    
+        # Broadcast USER_REMOVE to all connected servers
+        for server_id, link in self.servers.items():
+            try:
+                await link.websocket.send(json.dumps(user_advertise_message))
+                print(f"[{self.server_uuid}] Sent USER_ADVERTISE to server {server_id}")
+            except Exception as e:
+                    print(f"[{self.server_uuid}] Failed to send USER_ADVERTISE to {server_id}: {e}")
+
+            continue 
 
     async def wait_for_message(self, uri, expected_type):
         queue = self._incoming_responses[uri]
@@ -153,11 +174,6 @@ class Server:
                 print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
     
 
-    
-    
-   
-
-
     # Updated incoming_connection_handler for incoming connections (servers connecting to us)
     async def incoming_connection_handler(self, ws):
         """Handle incoming websocket connections (servers connecting to this server)."""
@@ -183,11 +199,23 @@ class Server:
                     continue
                     
             
-                # TODO: Handle USER_ADVERTISE (update user_locations + gossip forward)
+                # Handle USER_ADVERTISE (update user_locations + gossip forward)
                 if msg_type == "USER_ADVERTISE":
-                    print(f"[{self.server_uuid}] Recieved USER_ADVERTISE, Implementation Required")
+                    payload = frame.get("payload")
+                    user_location = payload.get("server_id")
+                    user_id = payload.get("user_id")
+
+                    # TODO: 1) Verify server signature 
+
+                    # 2) If verified, add to list 
+                    self.user_locations[user_id] = user_location
+
+                    # TODO: 3) Forward message to other servers (gossip)
+
+                    print(f"[debug] self.user_locations[{user_id}] = {self.user_locations[user_id]}")
                     continue
-                
+
+                    # TODO: 4) Notify my clients a new user has joined
                 
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 if msg_type == "USER_REMOVE":
@@ -225,7 +253,7 @@ class Server:
                     message["ts"] = time.time()
                     await ws.send(json.dumps(message))
 
-                    #TODO: USER_ADVERTISE TO OTHER SERVERS
+                    # USER_ADVERTISE TO OTHER SERVERS
                     user_advertise_message = deepcopy(self.JSON_base_template)
                     user_advertise_message["type"] = "USER_ADVERTISE"
                     user_advertise_message["from"] = self.server_uuid 
