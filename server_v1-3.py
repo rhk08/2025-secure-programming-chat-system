@@ -91,14 +91,14 @@ class Server:
         self.tasks = []
         self.server_websocket = None
         self.udp_sock = None
-        self._incoming_responses = {}
+        self._incoming_responses = {}   # uri -> asyncio.Queue
         self._shutdown_event = asyncio.Event()
         self.selected_bootstrap_server = {}
 
+        # Per-port DB file (one DB per server)
         self.db = ChatDB(f"chat_{self.port}.db")
 
-
-        print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port}")
+        print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port} ({'INTRODUCER' if self.introducer_mode else 'NORMAL'})")
 
     async def cleanup_client(self, user_id):
         self.local_users.pop(user_id, None)
@@ -129,7 +129,7 @@ class Server:
                 if uri in self._incoming_responses:
                     await self._incoming_responses[uri].put(msg)
         except websockets.exceptions.ConnectionClosed:
-            print(f"[{self.server_uuid}] Connection closed for {uri}")
+            print(f"[{self.server_uuid}] Outgoing connection closed for {uri}")
         finally:
             server_uuid = self.servers_websockets.pop(ws, None)
             if server_uuid:
@@ -139,8 +139,8 @@ class Server:
 
     async def incoming_connection_handler(self, ws):
         """Handle incoming websocket connections (servers or clients)."""
-        remote_host, remote_port = ws.remote_address
-        uri = f"ws://{remote_host}:{remote_port}"
+        remote = ws.remote_address
+        uri = f"ws://{remote[0]}:{remote[1]}" if isinstance(remote, tuple) else str(remote)
 
         try:
             async for msg in ws:
@@ -152,6 +152,7 @@ class Server:
                 msg_type = frame.get("type")
                 print(f"[{self.server_uuid}] Received {msg_type} from {frame.get('from')}")
 
+                # --- Server ↔ Introducer join ---
                 if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
                     await self.handle_server_hello_join(frame, ws)
                     continue
@@ -160,17 +161,20 @@ class Server:
                     await self.handle_server_announce(frame, ws)
                     continue
 
+                # --- User joins this server ---
                 if msg_type == "USER_HELLO":
                     client_id = str(uuid.uuid4())
                     payload = frame.get("payload", {}) or {}
                     pubkey_b64url = payload.get("pubkey")
                     if not pubkey_b64url:
-                        await ws.send(json.dumps({"type": "ERROR", "code": "BAD_KEY"}))
+                        await ws.send(json.dumps({"type": "ERROR", "code": "BAD_KEY", "reason": "missing pubkey"}))
                         continue
 
+                    # local presence
                     self.local_users[client_id] = Link(ws)
                     self.user_locations[client_id] = "local"
 
+                    # persist in DB
                     await self.db.upsert_user(
                         user_id=client_id,
                         pubkey_b64url=pubkey_b64url,
@@ -180,10 +184,12 @@ class Server:
                         version=1,
                     )
 
+                    # ensure membership in 'public'
                     now_ts = int(time.time())
                     await self.db.ensure_public_group(now_ts)
                     await self.db.add_member_to_group("public", client_id, pubkey_b64url, now_ts)
 
+                    # welcome
                     message = deepcopy(self.JSON_base_template)
                     message["type"] = "USER_WELCOME"
                     message["from"] = "Server"
@@ -194,16 +200,20 @@ class Server:
                     print(f"[{self.server_uuid}] Registered user {client_id} and added to 'public'")
                     continue
 
+                # --- Direct message routing ---
                 if msg_type == "MSG_DIRECT":
                     recipient = frame.get("to", "")
                     sender = frame.get("from", "")
 
                     if recipient not in self.user_locations:
+                        # NOTE: cross-server routing requires user_locations[recipient] = <server_id>.
+                        # You haven't implemented USER_ADVERTISE yet, so remote routing won't work.
                         await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
                         continue
 
                     if self.user_locations[recipient] == "local":
                         try:
+                            # deliver to local user as USER_DELIVER
                             message = deepcopy(self.JSON_base_template)
                             message["type"] = "USER_DELIVER"
                             message["from"] = self.server_uuid
@@ -213,8 +223,48 @@ class Server:
                             payload["sender"] = sender
                             message["payload"] = payload
                             await self.local_users[recipient].websocket.send(json.dumps(message))
-                            print(f"DEBUG: message to {recipient} from {sender} sent")
-                        except:
+                            print(f"DEBUG: MSG_DIRECT delivered to {recipient} from {sender}")
+                        except Exception:
+                            await self.cleanup_client(recipient)
+                    else:
+                        try:
+                            # Forward the ORIGINAL MSG_DIRECT frame unchanged to the peer server.
+                            # The remote server will see MSG_DIRECT and deliver locally.
+                            target_server_id = self.user_locations[recipient]
+                            link = self.servers.get(target_server_id)
+                            if not link:
+                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
+                                continue
+                            await link.websocket.send(json.dumps(frame))
+                            print(f"DEBUG: MSG_DIRECT forwarded to server {target_server_id} for user {recipient}")
+                        except Exception:
+                            await self.cleanup_client(recipient)
+                    continue
+
+                # --- FILE TRANSFER routing (DM only for now) ---
+                if msg_type == "FILE_START":
+                    payload = frame.get("payload") or {}
+                    mode = payload.get("mode", "dm")
+                    recipient = frame.get("to", "")
+                    sender = frame.get("from", "")
+
+                    if mode != "dm":
+                        await ws.send(json.dumps({
+                            "type": "ERROR",
+                            "code": "PUBLIC_NOT_IMPLEMENTED",
+                            "reason": "public channel file transfer not implemented yet"
+                        }))
+                        continue
+
+                    if recipient not in self.user_locations:
+                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        continue
+
+                    if self.user_locations[recipient] == "local":
+                        try:
+                            await self.local_users[recipient].websocket.send(json.dumps(frame))
+                            print(f"DEBUG: FILE_START routed to {recipient} from {sender}")
+                        except Exception:
                             await self.cleanup_client(recipient)
                     else:
                         try:
@@ -223,21 +273,63 @@ class Server:
                             if not link:
                                 await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-
-                            message = deepcopy(self.JSON_base_template)
-                            message["type"] = "SERVER_DELIVER"
-                            message["from"] = self.server_uuid
-                            message["to"] = target_server_id
-                            message["ts"] = time.time()
-                            payload = frame.get("payload", {}) or {}
-                            payload["sender"] = sender
-                            message["payload"] = payload
-                            await link.websocket.send(json.dumps(message))
-                            print(f"DEBUG: forwarded to server {target_server_id} for user {recipient}")
-                        except:
+                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                            print(f"DEBUG: FILE_START forwarded to server {target_server_id} for user {recipient}")
+                        except Exception:
                             await self.cleanup_client(recipient)
                     continue
 
+                if msg_type == "FILE_CHUNK":
+                    recipient = frame.get("to", "")
+                    if recipient not in self.user_locations:
+                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        continue
+
+                    if self.user_locations[recipient] == "local":
+                        try:
+                            await self.local_users[recipient].websocket.send(json.dumps(frame))
+                        except Exception:
+                            await self.cleanup_client(recipient)
+                    else:
+                        try:
+                            target_server_id = self.user_locations[recipient]
+                            link = self.servers.get(target_server_id)
+                            if not link:
+                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
+                                continue
+                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                        except Exception:
+                            await self.cleanup_client(recipient)
+                    continue
+
+                if msg_type == "FILE_END":
+                    recipient = frame.get("to", "")
+                    sender = frame.get("from", "")
+
+                    if recipient not in self.user_locations:
+                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        continue
+
+                    if self.user_locations[recipient] == "local":
+                        try:
+                            await self.local_users[recipient].websocket.send(json.dumps(frame))
+                            print(f"DEBUG: FILE_END delivered to {recipient} from {sender}")
+                        except Exception:
+                            await self.cleanup_client(recipient)
+                    else:
+                        try:
+                            target_server_id = self.user_locations[recipient]
+                            link = self.servers.get(target_server_id)
+                            if not link:
+                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
+                                continue
+                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                            print(f"DEBUG: FILE_END forwarded to server {target_server_id} for user {recipient}")
+                        except Exception:
+                            await self.cleanup_client(recipient)
+                    continue
+
+                # --- Pubkey lookup from DB ---
                 if msg_type == "PUB_KEY_REQUEST":
                     payload = frame.get("payload") or {}
                     target = payload.get("recipient_uuid")
@@ -254,7 +346,7 @@ class Server:
         except ConnectionClosedOK:
             print(f"[{self.server_uuid}] Graceful close from {uri}")
         except websockets.exceptions.ConnectionClosed:
-            print(f"[{self.server_uuid}] Incoming closed {uri}")
+            print(f"[{self.server_uuid}] Incoming connection closed {uri}")
         finally:
             server_uuid = self.servers_websockets.pop(ws, None)
             if server_uuid:
@@ -310,7 +402,7 @@ class Server:
                 data, addr = await loop.run_in_executor(None, self.udp_sock.recvfrom, 1024)
                 msg = data.decode()
                 if msg == "USER_ANNOUNCE":
-                    server_uri = f"ws://{self.host}:{self.port}"
+                    server_uri = f"ws://{self.host}:{self.port}"  # reply with the exact bound host:port
                     self.udp_sock.sendto(server_uri.encode(), addr)
         except asyncio.CancelledError:
             raise
@@ -344,6 +436,7 @@ class Server:
             await self.server_websocket.wait_closed()
 
     async def start(self):
+        # DB ready + ensure public group row
         await self.db.init()
         await self.db.ensure_public_group(int(time.time()))
 
@@ -430,6 +523,7 @@ class Server:
         for server_uuid, link in self.servers.items():
             try:
                 await link.websocket.send(json.dumps(announce))
+                print(f"[{self.server_uuid}] Sent SERVER_ANNOUNCE to {server_uuid}")
             except Exception:
                 pass
 
