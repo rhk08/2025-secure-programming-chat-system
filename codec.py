@@ -1,5 +1,6 @@
 
 import json
+import os
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidSignature
@@ -98,3 +99,6 @@ def decode_public_key_base64url(key_base64url):
         base64.urlsafe_b64decode(key_base64url)
     )
     return decoded_key_object
+
+def generate_symmetric_key(length: int = 32) -> bytes:
+    return os.urandom(length)

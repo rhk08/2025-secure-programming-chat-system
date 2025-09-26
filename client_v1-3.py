@@ -262,7 +262,14 @@ class Client:
                             payload = msg.get("payload")
                             ciphertext = payload.get("ciphertext")
 
-                            if ciphertext:
+                            if payload.get("group_message") == True:
+                                plaintext = payload.get("content")
+                                self.store_message(msg, plaintext)
+
+                                print(f"\n[Group message recieved]: {plaintext}")
+                                print(f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
+
+                            elif ciphertext:
                                 plaintext = await self.decrypt_message(ciphertext)
                                 self.store_message(msg, plaintext)
 
@@ -481,18 +488,32 @@ class Client:
                     recipient = cmd_parts[1]
 
                 message = cmd_parts[2]
+                timestamp = int(time.time() * 1000)
 
                 if recipient == 'Group':
-                    print("[i] Group messaging to be implemented")
+                    msg_public = deepcopy(self.JSON_base_template)
+                    msg_public['type'] = "MSG_PUBLIC_CHANNEL"
+                    msg_public['from'] = self.client_id
+                    msg_public['to'] = "Server"
+                    msg_public['ts'] = timestamp
+                    msg_public['payload'] = {
+                        "content": message,
+                        "sender_pub": self.public_key_base64url,
+                        "group_message": True
+                    }
+
+                    self.store_message(msg_public, message)  # store locally
+                    await self.websocket.send(json.dumps(msg_public))
+                    print("[i] Group message sent successfully!")
                     continue
-                
+
                 else:
                     # request recipient's public key
                     pubkey_request = deepcopy(self.JSON_base_template)
                     pubkey_request['type'] = "PUB_KEY_REQUEST"
                     pubkey_request['from'] = self.client_id
                     pubkey_request['to'] = "Server"
-                    pubkey_request['ts'] = time.time()
+                    pubkey_request['ts'] = timestamp
                     pubkey_request['payload'] = {
                         "recipient_uuid": recipient
                         }

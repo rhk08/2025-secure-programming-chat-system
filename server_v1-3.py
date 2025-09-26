@@ -34,7 +34,7 @@ class Link:
         await self.websocket.close()
 
 class Server:
-    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
+    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)
@@ -106,6 +106,10 @@ class Server:
         
         self._shutdown_event = asyncio.Event()
         self.selected_bootstrap_server = {}
+
+        self.public_channel_id = "PUBLIC"
+        self.public_channel_key = codec.generate_symmetric_key()
+        self.public_channel_members = set()
         
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port}")
 
@@ -199,6 +203,35 @@ class Server:
                 # TODO: Handle ACK (log/track successful delivery)
                 # TODO: Handle ERROR (parse code, log, maybe correct state)
 
+                if msg_type == "SERVER_PUBLIC_CHANNEL":
+                    try:
+                        payload = frame.get("payload", {})
+                        original_sender = payload.get("original_sender")  # user_id on origin server
+                        orig_payload = payload.get("payload", {})
+                        # Build deliver message to local users
+                        deliver = deepcopy(self.JSON_base_template)
+                        deliver["type"] = "PUBLIC_CHANNEL_DELIVER"
+                        deliver["from"] = original_sender
+                        deliver["to"] = self.public_channel_id
+                        deliver["ts"] = payload.get("ts", time.time())
+                        deliver["payload"] = orig_payload
+                        # Deliver to all local public channel members
+                        for member_id in list(self.public_channel_members):
+                            # don't attempt to send to non-local users in the set
+                            if self.user_locations.get(member_id) != "local":
+                                continue
+                            # don't send back to original sender if their id conflicts locally
+                            if member_id == original_sender:
+                                continue
+                            try:
+                                await self.local_users[member_id].websocket.send(json.dumps(deliver))
+                            except Exception as e:
+                                print(f"[{self.server_uuid}] Failed delivering forwarded public message to {member_id}: {e}")
+                                await self.cleanup_client(member_id)
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Error handling SERVER_PUBLIC_CHANNEL: {e}")
+                    continue
+
                 # --- User ↔ Server TODOs ---
                 # TODO: Handle USER_HELLO (register local user, broadcast USER_ADVERTISE)
                 if msg_type == "USER_HELLO":
@@ -226,6 +259,51 @@ class Server:
                     await ws.send(json.dumps(message))
 
                     #TODO: USER_ADVERTISE TO OTHER SERVERS
+
+                    try:
+                        # Add to this server's public channel membership
+                        self.public_channel_members.add(client_id)
+
+                        # Get client's public key object (client supplied base64url-encoded PEM)
+                        client_pubkey_b64 = payload.get("pubkey")
+                        if client_pubkey_b64:
+                            client_pubkey_obj = codec.decode_public_key_base64url(client_pubkey_b64)
+
+                            # Encrypt public channel symmetric key (bytes) with client's RSA pubkey
+                            encrypted_key_bytes = client_pubkey_obj.encrypt(
+                                self.public_channel_key,
+                                padding.OAEP(
+                                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                                    algorithm=hashes.SHA256(),
+                                    label=None
+                                )
+                            )
+                            encrypted_key_b64 = base64.urlsafe_b64encode(encrypted_key_bytes).decode("utf-8")
+                        else:
+                            # No public key provided (should not happen in valid flows)
+                            encrypted_key_b64 = None
+
+                        # Send PUBLIC_CHANNEL_JOIN message (signed)
+                        join_msg = deepcopy(self.JSON_base_template)
+                        join_msg["type"] = "PUBLIC_CHANNEL_JOIN"
+                        join_msg["from"] = self.server_uuid
+                        join_msg["to"] = client_id
+                        join_msg["ts"] = time.time()
+                        join_msg["payload"] = {
+                            "channel_id": self.public_channel_id,
+                            "encrypted_key": encrypted_key_b64
+                        }
+                        # sign payload
+                        try:
+                            join_msg["sig"] = codec.generate_payload_signature(join_msg, self.private_key)
+                        except Exception:
+                            join_msg["sig"] = "..."  # fallback if signing fails
+
+                        await ws.send(json.dumps(join_msg))
+                        print(f"[{self.server_uuid}] Sent PUBLIC_CHANNEL_JOIN to {client_id}")
+
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Failed to add {client_id} to public channel or send key: {e}")
                     
                     continue
 
@@ -282,6 +360,58 @@ class Server:
                             await self.cleanup_client(recipient)
                         
                 # TODO: Handle MSG_PUBLIC_CHANNEL (fan-out to members, maintain channel state)
+                if msg_type == "MSG_PUBLIC_CHANNEL":
+                    try:
+                        sender = frame.get("from")
+                        payload = frame.get("payload", {})
+
+                        # Deliver to all local members (except sender)
+                        deliver = deepcopy(self.JSON_base_template)
+                        deliver["type"] = "PUBLIC_CHANNEL_DELIVER"
+                        deliver["from"] = sender
+                        deliver["to"] = self.public_channel_id
+                        deliver["ts"] = frame.get("ts", time.time())
+                        deliver["payload"] = payload
+
+                        for member_id in list(self.public_channel_members):
+                            if member_id == sender:
+                                continue
+                            # Only attempt local delivery if member is local
+                            if self.user_locations.get(member_id) != "local":
+                                continue
+                            try:
+                                await self.local_users[member_id].websocket.send(json.dumps(deliver))
+                            except Exception as e:
+                                print(f"[{self.server_uuid}] Failed to deliver public message to {member_id}: {e}")
+                                await self.cleanup_client(member_id)
+
+                        # Forward to other servers so they deliver to their local members
+                        forward = deepcopy(self.JSON_base_template)
+                        forward["type"] = "SERVER_PUBLIC_CHANNEL"
+                        forward["from"] = self.server_uuid
+                        forward["to"] = "*"  # broadcast to all servers
+                        forward["ts"] = time.time()
+                        forward["payload"] = {
+                            "original_sender": sender,
+                            "payload": payload,
+                            "ts": frame.get("ts", time.time())
+                        }
+                        # sign forwarded payload if desired
+                        try:
+                            forward["sig"] = codec.generate_payload_signature(forward, self.private_key)
+                        except Exception:
+                            forward["sig"] = "..."
+
+                        for server_id, link in self.servers.items():
+                            try:
+                                await link.websocket.send(json.dumps(forward))
+                            except Exception as e:
+                                print(f"[{self.server_uuid}] Failed forwarding public channel msg to server {server_id}: {e}")
+
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Error handling MSG_PUBLIC_CHANNEL: {e}")
+                    continue
+                
                 # TODO: Handle FILE_START / FILE_CHUNK / FILE_END (forward chunks per §9.4)
 
                 # RSA public key request
