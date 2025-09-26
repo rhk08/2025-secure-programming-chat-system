@@ -163,7 +163,12 @@ class Server:
         """Handle incoming websocket connections (servers connecting to this server)."""
         remote_host, remote_port = ws.remote_address
         uri = f"ws://{remote_host}:{remote_port}"
-    
+
+        if ws in self.servers_websockets:
+            server_uuid = self.servers_websockets[ws]
+            link = self.servers.get(server_uuid)
+            if link:
+                link.last_heartbeat = time.time()
         
         try:            
             async for msg in ws:
@@ -403,8 +408,6 @@ class Server:
 
         except Exception as e:
             print(f"[{self.server_uuid}] Failed to process SERVER_ANNOUNCE: {e}")
-
-    
     
     async def udp_discovery_server(self):
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -431,11 +434,38 @@ class Server:
                 print(f"[{self.server_uuid}] UDP discovery server closed")
     
     async def heartbeat_loop(self, delay=15):
-        """Periodically send a frame to all servers to check if they are still alive"""
         try:
             while not self._shutdown_event.is_set():
-                
+                now = time.time()
+                to_remove = []
+
+                for server_uuid, link in self.servers.items():
+                    ws = link.websocket
+                    try:
+                        # Ping the websocket to check if it's alive
+                        pong_waiter = await ws.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=5)
+                        
+                        link.last_heartbeat = time.time()
+                        
+                        # Log live status
+                        print(f"[{self.server_uuid}] Server {server_uuid} is alive (last heartbeat {now - link.last_heartbeat:.2f}s ago)")
+
+                    except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                        print(f"[{self.server_uuid}] Server {server_uuid} failed heartbeat, closing connection")
+                        to_remove.append(server_uuid)
+                        await ws.close()
+
+                # Cleanup dead connections
+                for server_uuid in to_remove:
+                    link = self.servers.pop(server_uuid, None)
+                    if link:
+                        self.servers_websockets.pop(link.websocket, None)
+                        self.server_addrs.pop(server_uuid, None)
+                        print(f"[{self.server_uuid}] Cleaned up server {server_uuid}")
+
                 await asyncio.sleep(delay)
+
         except asyncio.CancelledError:
             print(f"[{self.server_uuid}] Heartbeat loop cancelled")
             raise
