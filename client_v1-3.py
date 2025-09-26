@@ -8,22 +8,22 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.exceptions import InvalidSignature
 from copy import deepcopy
-import time 
+import time
 import uuid
 
 UDP_DISCOVERY_PORT = 9999
 HEARTBEAT_INTERVAL = 10
+
 
 class Client:
     def __init__(self):
         self.websocket = None
         self.client_id = "ERROR Client_UUID not assigned!"
         self._pending_key_requests = {}
-        
+
         # friends list
         self.friends_by_id = {}
         self.friends_by_name = {}
-
 
         # generate keys using cryptography library (same as server)
         self.private_key = rsa.generate_private_key(
@@ -31,21 +31,26 @@ class Client:
             key_size=2048
         )
         self.public_key = self.private_key.public_key()
-        
+
         # export in PEM format
         public_key_pem = self.public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode('utf-8')
+        self.public_key_base64url = base64.urlsafe_b64encode(
+            public_key_pem).decode('utf-8')
 
         self.server_uri = None
         self._incoming_responses = asyncio.Queue()
-        
+
         self.message_history = {}
         self.unread_messages = {}
 
         self.JSON_base_template = self._load_json("SOCP.json")
+
+        # --- Public channel state ---
+        self.public_channel_id = "public"
+        self.public_channel_key = None
 
     # ---------------- Load JSON template from file ----------------
     def _load_json(self, file_path):
@@ -69,9 +74,10 @@ class Client:
 
     # ---------------- RSA encryption ----------------
     async def encrypt_message(self, message, recipient_pubkey_b64url):
-        pem_bytes = base64.urlsafe_b64decode(recipient_pubkey_b64url.encode("utf-8"))
+        pem_bytes = base64.urlsafe_b64decode(
+            recipient_pubkey_b64url.encode("utf-8"))
         recipient_pubkey = serialization.load_pem_public_key(pem_bytes)
-        
+
         ciphertext = recipient_pubkey.encrypt(
             message.encode("utf-8"),
             padding.OAEP(
@@ -94,14 +100,15 @@ class Client:
             )
         )
         return plaintext.decode("utf-8")
-    
+
     # ---------------- Create message signature ----------------
     async def sign_message(self, sender_privkey, ciphertext, sender_id, recipient_id, timestamp):
         # ensure timestamp is consistent (6 decimal places)
         ts_str = f"{timestamp:.6f}"
 
         # Concatenate string exactly the same way for signing and verification
-        sign_data = f"{ciphertext}|{sender_id}|{recipient_id}|{ts_str}".encode('utf-8')
+        sign_data = f"{ciphertext}|{sender_id}|{recipient_id}|{ts_str}".encode(
+            'utf-8')
 
         signature = sender_privkey.sign(
             sign_data,
@@ -144,9 +151,10 @@ class Client:
             pem_bytes = base64.urlsafe_b64decode(sender_pubkey_b64url)
             sender_pubkey_obj = serialization.load_pem_public_key(pem_bytes)
 
-            # reconstruct signed string 
+            # reconstruct signed string
             ts_str = f"{ts:.6f}"
-            sign_data = f"{ciphertext}|{sender}|{recipient}|{ts_str}".encode('utf-8')
+            sign_data = f"{ciphertext}|{sender}|{recipient}|{ts_str}".encode(
+                'utf-8')
 
             # decode signature
             signature = base64.urlsafe_b64decode(signature_b64url)
@@ -161,7 +169,7 @@ class Client:
             # print(f"Reconstructed signed bytes: {sign_data}")
             # print(f"Signature (b64url): {signature_b64url}")
             # print(f"Signature bytes: {signature}")
-            
+
             # verify
             sender_pubkey_obj.verify(
                 signature,
@@ -181,16 +189,16 @@ class Client:
             print(f"[! DEBUG] Verification error: {e}")
             return False
 
-    
     # ---------------- Sign-in ----------------
+
     async def signin(self):
         while True:
-  
+
             # message formatted to SOCP specifications
             message = deepcopy(self.JSON_base_template)
             message["type"] = "USER_HELLO"
             message["from"] = "Guest"
-            message["to"] = "Server" #TODO: sub with actual server details 
+            message["to"] = "Server"  # TODO: sub with actual server details
             message["ts"] = time.time()
             message["payload"] = {
                 "client": "cli-v1",
@@ -199,14 +207,16 @@ class Client:
             }
 
             await self.websocket.send(json.dumps(message))
-            
+
             response = json.loads(await self.websocket.recv())
             self.client_id = response.get("to")
 
-            #sharing available commands with user on join
+            # sharing available commands with user on join
             print("[i] Available commands:")
             print("  chat <recipient> <message>  - send a message to a user or 'Group'")
-            print("  history [user]              - show message history with a specific user, or all unread messages if no user is specified")
+            print("  all <message>               - send a message to the public channel")
+            print(
+                "  history [user]              - show message history with a specific user, or all unread messages if no user is specified")
             print("  add <uuid> <name>          - add a user as a friend")
             print("  friends                    - shows a list of your friends")
             print("  whoami                     - show your current username")
@@ -216,13 +226,14 @@ class Client:
             print("  help or -h                 - show this help message")
 
             return
-    
+
     def store_message(self, msg, plaintext):
-        sender = msg.get('from', 'Unknown') 
+        sender = msg.get('from', 'Unknown')
         recipient = msg.get('to', 'Unknown')  # fallback to Group
         timestamp = msg.get('ts', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    
-        history_key = sender if recipient == self.client_id else recipient  # store by conversation
+
+        # store by conversation
+        history_key = sender if recipient == self.client_id else recipient
 
         if history_key not in self.message_history:
             self.message_history[history_key] = []
@@ -236,18 +247,22 @@ class Client:
             "recipient": recipient,
             "message": plaintext,
             "direction": "in" if sender != self.client_id else "out",
-            "seen" : False
+            "seen": False
         })
-        
+
     # ---------------- Listen ----------------
     async def listen_for_messages(self):
         try:
             async for json_message in self.websocket:
                 msg = json.loads(json_message)
-            
+
                 # If this is a public key response, put it in the queue
                 if msg.get("type") == "PUB_KEY":
                     await self._incoming_responses.put(msg)
+                elif msg.get("type") == "PUBLIC_CHANNEL_KEY":
+                    payload = msg.get("payload", {}) or {}
+                    self.public_channel_key = payload.get("channel_key")
+                    print("[i] Joined public channel. Key received.")
                 # elif msg.get("type") == "pong":
                 #     await self._incoming_responses.put(msg)
                 # elif msg.get("type") == "user_list":
@@ -255,32 +270,45 @@ class Client:
                 else:
                     # handle chat, heartbeat, etc
                     if msg['type'] == "USER_DELIVER":
-                        
+                        payload = msg.get("payload", {}) or {}
+                        ciphertext = payload.get("ciphertext")
+
+                        # Public channel messages are plaintext (no ciphertext/signature)
+                        if not ciphertext and payload.get("channel_id") == self.public_channel_id:
+                            content = payload.get("content")
+                            sender_label = self.friends_by_id.get(payload.get(
+                                'sender')) or payload.get('sender') or 'Unknown'
+                            self.store_message(
+                                msg, content or json.dumps(payload))
+                            print(f"\n[Public] {sender_label}: {content}")
+                            print(
+                                f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
+                            continue
+
+                        # Otherwise expect encrypted direct message
                         print("message received !!")
                         if await self.verify_message(msg):
-                            
-                            payload = msg.get("payload")
                             ciphertext = payload.get("ciphertext")
-
                             if ciphertext:
                                 plaintext = await self.decrypt_message(ciphertext)
                                 self.store_message(msg, plaintext)
-
                                 if self.friends_by_id.get(msg.get('from')) == None:
-                                    print(f"\n[!] Message received from {msg.get('from')}:")
+                                    print(
+                                        f"\n[!] Message received from {msg.get('from')}:")
                                 else:
-                                    print(f"\n[!] Message received from {self.friends_by_id.get(msg.get('from'))}:")
+                                    print(
+                                        f"\n[!] Message received from {self.friends_by_id.get(msg.get('from'))}:")
                                 print(plaintext)
-                                print(f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
-
+                                print(
+                                    f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
                             else:
-                                print("[! DEBUG] Message received but signature verification failed")
-                                     
+                                print(
+                                    "[! DEBUG] Message received but signature verification failed")
+
                     elif msg["type"] == "heartbeat":
                         await self.websocket.send(json.dumps({"type": "heartbeat_ack", "sender": self.client_id}))
         except websockets.exceptions.ConnectionClosed:
             print("\n[!] Connection closed")
-
 
     def add_friend(self, friend_id, friend_name):
         if len(friend_name) > 12:
@@ -303,7 +331,8 @@ class Client:
                 # remove old name entry
                 if old_name in self.friends_by_name:
                     del self.friends_by_name[old_name]
-                print(f"Updated friend {friend_id}: {old_name} to {friend_name}")
+                print(
+                    f"Updated friend {friend_id}: {old_name} to {friend_name}")
 
         else:
             print(f"Friend added: {friend_name} ({friend_id})")
@@ -317,7 +346,7 @@ class Client:
     # TODO: Implement /tell <user> <text> → DM
     # TODO: Implement /all <text> → Public channel message
     # TODO: Implement /file <user> <path> → File transfer
-    
+
     async def send_messages(self):
         loop = asyncio.get_event_loop()
 
@@ -343,15 +372,17 @@ class Client:
             # ----- Help -----
             if cmd in ("help", "-h"):
                 print("[i] Available commands:")
-                print("  chat <recipient> <message>  - send a message to a user or 'Group'")
-                print("  history [user]              - show message history with a specific user, or all unread messages if no user is specified")
+                print(
+                    "  chat <recipient> <message>  - send a message to a user or 'Group'")
+                print(
+                    "  history [user]              - show message history with a specific user, or all unread messages if no user is specified")
                 print("  add <uuid> <name>          - add a user as a friend")
                 print("  whoami                     - show your current username")
                 print("  ping                       - send a ping to the server")
                 print("  list                       - list all connected users")
                 print("  quit or q                  - exit the client")
                 print("  help or -h                 - show this help message")
-                
+
                 continue
 
             # ----- Whoami -----
@@ -394,13 +425,13 @@ class Client:
                 #             print("[i] No users currently connected.")
                 #         break
                 # continue
-            
+
             # ----- History -----
             elif cmd == "history":
                 if len(cmd_parts) < 1:
                     print("[!] Usage: history <user>")
                     continue
-                
+
                 if len(cmd_parts) == 1:
                     print("[i] Unread messages per user:")
                     for user, count in self.unread_messages.items():
@@ -427,23 +458,22 @@ class Client:
                 # Display the message history
                 print(f"[i] Message history with {target_friend}:")
                 for msg in target_user_history:
-                    
-                    
+
                     ts = msg.get("timestamp", "")
                     sender = msg.get("sender", "")
                     content = msg.get("message", "")
                     direction = msg.get("direction", "")
-                    
+
                     prefix = "You" if direction == "out" else sender
                     new_tag = " [NEW]" if not msg.get("seen", False) else ""
-                    
+
                     print(f"[{ts}]{new_tag} {prefix}: {content}")
-                    
+
                     # Mark message as seen
                     msg["seen"] = True
-                   
+
                 self.unread_messages[target_user] = 0
-                    
+
                 continue
 
             # ----- Add -----
@@ -451,7 +481,7 @@ class Client:
                 if len(cmd_parts) < 3:
                     print("[!] Usage: add <name> <uuid>")
                     continue
-                
+
                 self.add_friend(cmd_parts[1], cmd_parts[2])
 
             # ----- Friends -----
@@ -471,7 +501,7 @@ class Client:
                 if len(cmd_parts) < 3:
                     print("[!] Usage: chat <recipient> <message>")
                     continue
-                
+
                 # Check if recipient is on friends list
                 friend_receiving = self.friends_by_name.get(cmd_parts[1])
                 if friend_receiving != None:
@@ -483,9 +513,17 @@ class Client:
                 message = cmd_parts[2]
 
                 if recipient == 'Group':
-                    print("[i] Group messaging to be implemented")
+                    # Map to public channel broadcast
+                    msg_pub = deepcopy(self.JSON_base_template)
+                    msg_pub['type'] = "MSG_PUBLIC_CHANNEL"
+                    msg_pub['from'] = self.client_id
+                    msg_pub['to'] = "*"
+                    msg_pub['ts'] = time.time()
+                    msg_pub['payload'] = {"content": message}
+                    await self.websocket.send(json.dumps(msg_pub))
+                    print("[i] Public message sent.")
                     continue
-                
+
                 else:
                     # request recipient's public key
                     pubkey_request = deepcopy(self.JSON_base_template)
@@ -495,20 +533,22 @@ class Client:
                     pubkey_request['ts'] = time.time()
                     pubkey_request['payload'] = {
                         "recipient_uuid": recipient
-                        }
+                    }
                     await self.websocket.send(json.dumps(pubkey_request))
 
-                    # wait for PUB_KEY response 
+                    # wait for PUB_KEY response
                     recipient_pubkey_b64url = None
                     while True:
                         msg = await self._incoming_responses.get()
                         payload = msg.get("payload", {})
                         if msg.get("type") == "PUB_KEY" and payload.get("recipient_uuid") == recipient:
-                            recipient_pubkey_b64url = payload.get("recipient_pub")
+                            recipient_pubkey_b64url = payload.get(
+                                "recipient_pub")
                             break
 
                     if not recipient_pubkey_b64url:
-                        print(f"[!] Cannot obtain public key for {friend_receiving}")
+                        print(
+                            f"[!] Cannot obtain public key for {friend_receiving}")
                         continue
 
                     # encrypt the message
@@ -535,15 +575,31 @@ class Client:
                         "content_sig": signature_b64url
                     }
 
-                    self.store_message(msg_direct, message)  # store plaintext locally
+                    # store plaintext locally
+                    self.store_message(msg_direct, message)
                     await self.websocket.send(json.dumps(msg_direct))
                     print("[i] Message sent successfully!")
+
+            # ----- Public channel broadcast -----
+            elif cmd == "all":
+                if len(cmd_parts) < 2:
+                    print("[!] Usage: all <message>")
+                    continue
+                message = cmd_parts[1]
+                msg_pub = deepcopy(self.JSON_base_template)
+                msg_pub['type'] = "MSG_PUBLIC_CHANNEL"
+                msg_pub['from'] = self.client_id
+                msg_pub['to'] = "*"
+                msg_pub['ts'] = time.time()
+                msg_pub['payload'] = {"content": message}
+                await self.websocket.send(json.dumps(msg_pub))
+                print("[i] Public message sent.")
 
             # ----- Unknown command -----
             else:
                 print("[!] Unknown command. Type 'help' for a list of commands.")
                 continue
-        
+
     # ---------------- Start ----------------
     async def start(self):
         self.discover_server()
@@ -553,6 +609,7 @@ class Client:
             self.websocket = ws
             await self.signin()
             await asyncio.gather(self.listen_for_messages(), self.send_messages())
+
 
 if __name__ == "__main__":
     client = Client()
@@ -573,15 +630,15 @@ if __name__ == "__main__":
 #         self._incoming_responses = asyncio.Queue() # Queue to allow for the program to wait on specific responses
 #         self.websocket = None
 
-    
+
 #     async def shutdown(self):
 #         return
-    
+
 #     async def start(self):
 #         async with websockets.connect() as socket:
 #             self.websocket = socket
-            
-            
+
+
 #         return
 
 # if __name__ == "__main__":

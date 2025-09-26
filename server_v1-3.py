@@ -17,6 +17,7 @@ from cryptography.exceptions import InvalidSignature
 
 import codec
 import base64
+import os
 
 
 # --- Load bootstrap servers ---
@@ -106,6 +107,14 @@ class Server:
         
         self._shutdown_event = asyncio.Event()
         self.selected_bootstrap_server = {}
+
+        # --- Public Channel State ---
+        # Single default public channel per server. All local users are members by default
+        self.public_channel_id = "public"
+        # Symmetric key material for the public channel (not used by server, delivered to clients)
+        self.public_channel_key = base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8")
+        # Track local membership (cannot be removed per requirements)
+        self.public_channel_members_local = set()
         
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port}")
 
@@ -114,6 +123,9 @@ class Server:
         self.client_public_keys.pop(username, None)
         print(f"[-] Removed client: {username}")
         # TODO: Notify peers
+        # Remove from local public channel membership
+        if username in self.public_channel_members_local:
+            self.public_channel_members_local.discard(username)
 
     async def wait_for_message(self, uri, expected_type):
         queue = self._incoming_responses[uri]
@@ -181,6 +193,50 @@ class Server:
                 if msg_type == "SERVER_ANNOUNCE":
                     await self.handle_server_announce(frame, ws)
                     continue
+
+                # Fan-out public channel messages received from peers to our local members
+                if msg_type == "SERVER_PUBLIC_CHANNEL":
+                    deliver_payload = frame.get("payload", {}) or {}
+                    if not isinstance(deliver_payload, dict):
+                        deliver_payload = {"content": deliver_payload}
+                    deliver_payload["channel_id"] = self.public_channel_id
+
+                    for member_id in list(self.public_channel_members_local):
+                        if member_id in self.local_users:
+                            try:
+                                out_msg = deepcopy(self.JSON_base_template)
+                                out_msg["type"] = "USER_DELIVER"
+                                out_msg["from"] = self.server_uuid
+                                out_msg["to"] = member_id
+                                out_msg["ts"] = frame.get("ts", time.time())
+                                out_msg["payload"] = deliver_payload
+                                await self.local_users[member_id].websocket.send(json.dumps(out_msg))
+                            except Exception:
+                                await self.cleanup_client(member_id)
+                    continue
+                
+                # Receive public channel key from peer server and deliver to our local members
+                if msg_type == "SERVER_PUBLIC_CHANNEL_KEY":
+                    payload = frame.get("payload", {}) or {}
+                    channel_key = payload.get("channel_key")
+                    if isinstance(channel_key, str) and channel_key:
+                        self.public_channel_key = channel_key
+                        for member_id in list(self.public_channel_members_local):
+                            if member_id in self.local_users:
+                                try:
+                                    key_msg = deepcopy(self.JSON_base_template)
+                                    key_msg["type"] = "PUBLIC_CHANNEL_KEY"
+                                    key_msg["from"] = self.server_uuid
+                                    key_msg["to"] = member_id
+                                    key_msg["ts"] = time.time()
+                                    key_msg["payload"] = {
+                                        "channel_id": self.public_channel_id,
+                                        "channel_key": self.public_channel_key
+                                    }
+                                    await self.local_users[member_id].websocket.send(json.dumps(key_msg))
+                                except Exception:
+                                    await self.cleanup_client(member_id)
+                    continue
                     
             
                 # TODO: Handle USER_ADVERTISE (update user_locations + gossip forward)
@@ -224,6 +280,21 @@ class Server:
                     message["to"] = client_id
                     message["ts"] = time.time()
                     await ws.send(json.dumps(message))
+
+                    # Add user to public channel by default
+                    self.public_channel_members_local.add(client_id)
+
+                    # Send public channel key to the new member
+                    key_msg = deepcopy(self.JSON_base_template)
+                    key_msg["type"] = "PUBLIC_CHANNEL_KEY"
+                    key_msg["from"] = self.server_uuid
+                    key_msg["to"] = client_id
+                    key_msg["ts"] = time.time()
+                    key_msg["payload"] = {
+                        "channel_id": self.public_channel_id,
+                        "channel_key": self.public_channel_key
+                    }
+                    await ws.send(json.dumps(key_msg))
 
                     #TODO: USER_ADVERTISE TO OTHER SERVERS
                     
@@ -282,6 +353,87 @@ class Server:
                             await self.cleanup_client(recipient)
                         
                 # TODO: Handle MSG_PUBLIC_CHANNEL (fan-out to members, maintain channel state)
+                if msg_type == "MSG_PUBLIC_CHANNEL":
+                    sender = frame.get("from", "")
+                    # Fan-out to all local members
+                    deliver_payload = frame.get("payload", {}) or {}
+                    if not isinstance(deliver_payload, dict):
+                        deliver_payload = {"content": deliver_payload}
+                    deliver_payload["sender"] = sender
+                    deliver_payload["channel_id"] = self.public_channel_id
+
+                    # Deliver to local members
+                    for member_id in list(self.public_channel_members_local):
+                        if member_id in self.local_users:
+                            try:
+                                out_msg = deepcopy(self.JSON_base_template)
+                                out_msg["type"] = "USER_DELIVER"
+                                out_msg["from"] = self.server_uuid
+                                out_msg["to"] = member_id
+                                out_msg["ts"] = frame.get("ts", time.time())
+                                out_msg["payload"] = deliver_payload
+                                await self.local_users[member_id].websocket.send(json.dumps(out_msg))
+                            except Exception:
+                                await self.cleanup_client(member_id)
+
+                    # Forward to peer servers so they can fan-out to their local members
+                    server_fanout = deepcopy(self.JSON_base_template)
+                    server_fanout["type"] = "SERVER_PUBLIC_CHANNEL"
+                    server_fanout["from"] = self.server_uuid
+                    server_fanout["to"] = "*"
+                    server_fanout["ts"] = frame.get("ts", time.time())
+                    server_fanout["payload"] = deliver_payload
+
+                    for server_uuid, link in self.servers.items():
+                        try:
+                            await link.websocket.send(json.dumps(server_fanout))
+                        except Exception:
+                            # Best-effort fan-out
+                            pass
+
+                    continue
+                
+                # Creator -> Server: Set/update the public channel key and distribute
+                if msg_type == "PUBLIC_CHANNEL_KEY_SET":
+                    payload = frame.get("payload", {}) or {}
+                    new_key = payload.get("channel_key")
+                    if isinstance(new_key, str) and new_key:
+                        # Update local key
+                        self.public_channel_key = new_key
+                        
+                        # Deliver to all local members
+                        for member_id in list(self.public_channel_members_local):
+                            if member_id in self.local_users:
+                                try:
+                                    key_msg = deepcopy(self.JSON_base_template)
+                                    key_msg["type"] = "PUBLIC_CHANNEL_KEY"
+                                    key_msg["from"] = self.server_uuid
+                                    key_msg["to"] = member_id
+                                    key_msg["ts"] = time.time()
+                                    key_msg["payload"] = {
+                                        "channel_id": self.public_channel_id,
+                                        "channel_key": self.public_channel_key
+                                    }
+                                    await self.local_users[member_id].websocket.send(json.dumps(key_msg))
+                                except Exception:
+                                    await self.cleanup_client(member_id)
+
+                        # Forward key to peer servers to distribute to their members
+                        server_key = deepcopy(self.JSON_base_template)
+                        server_key["type"] = "SERVER_PUBLIC_CHANNEL_KEY"
+                        server_key["from"] = self.server_uuid
+                        server_key["to"] = "*"
+                        server_key["ts"] = time.time()
+                        server_key["payload"] = {
+                            "channel_id": self.public_channel_id,
+                            "channel_key": self.public_channel_key
+                        }
+                        for server_uuid, link in self.servers.items():
+                            try:
+                                await link.websocket.send(json.dumps(server_key))
+                            except Exception:
+                                pass
+                    continue
                 # TODO: Handle FILE_START / FILE_CHUNK / FILE_END (forward chunks per §9.4)
 
                 # RSA public key request
