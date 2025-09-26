@@ -220,13 +220,31 @@ class Server:
                     # message formatted to SOCP specifications
                     message = deepcopy(self.JSON_base_template)
                     message["type"] = "USER_WELCOME"
-                    message["from"] = "Server" 
+                    message["from"] = self.server_uuid
                     message["to"] = client_id
                     message["ts"] = time.time()
                     await ws.send(json.dumps(message))
 
                     #TODO: USER_ADVERTISE TO OTHER SERVERS
+                    user_advertise_message = deepcopy(self.JSON_base_template)
+                    user_advertise_message["type"] = "USER_ADVERTISE"
+                    user_advertise_message["from"] = self.server_uuid 
+                    user_advertise_message["to"] = "*"
+                    user_advertise_message["ts"] = time.time()
+                    user_advertise_message["payload"] = {
+                        "user_id": client_id,
+                        "server_id": self.server_uuid,
+                        "meta": {}
+                    }
                     
+                    # Broadcast USER_ADVERTISE to all connected servers
+                    for server_id, link in self.servers.items():
+                        try:
+                            await link.websocket.send(json.dumps(user_advertise_message))
+                            print(f"[{self.server_uuid}] Sent USER_ADVERTISE to server {server_id}")
+                        except Exception as e:
+                            print(f"[{self.server_uuid}] Failed to send USER_ADVERTISE to {server_id}: {e}")
+
                     continue
 
                 # TODO: Handle MSG_DIRECT (wrap into SERVER_DELIVER or deliver locally)
