@@ -404,19 +404,41 @@ class Server:
                             print(f"DEBUG: MSG_DIRECT delivered to {recipient} from {sender}")
                         except Exception:
                             await self.cleanup_client(recipient)
+                            
+                            
                     else:
                         try:
-                            # Forward the ORIGINAL MSG_DIRECT frame unchanged to the peer server.
-                            # The remote server will see MSG_DIRECT and deliver locally.
-                            target_server_id = self.user_locations[recipient]
-                            link = self.servers.get(target_server_id)
-                            if not link:
-                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
-                                continue
-                            await link.websocket.send(json.dumps(frame))
-                            print(f"DEBUG: MSG_DIRECT forwarded to server {target_server_id} for user {recipient}")
-                        except Exception:
-                            await self.cleanup_client(recipient)
+                            server_location = self.user_locations[recipient]
+                            
+                            # Create SERVER_DELIVER message
+                            server_deliver_msg = deepcopy(self.JSON_base_template)
+                            server_deliver_msg["type"] = "SERVER_DELIVER"
+                            server_deliver_msg["from"] = self.server_uuid
+                            server_deliver_msg["to"] = server_location
+                            server_deliver_msg["ts"] = frame.get("ts") # not sure if this is the correct way...
+
+                            # Include original payload + metadata
+                            payload = frame.get("payload", {})
+                            if not isinstance(payload, dict):
+                                payload = payload
+                            
+                            payload["sender"] = sender
+                            payload["user_id"] = recipient  
+                            payload["original_ts"] = frame.get("ts")  # Preserve original timestamp
+                            
+                            server_deliver_msg["payload"] = payload
+
+                            #server_deliver_msg["sig"] = server sig over payload
+
+                            if server_location in self.servers:
+                                await self.servers[server_location].websocket.send(json.dumps(server_deliver_msg))
+                                print(f'[{self.server_uuid}] Forwarded message from {sender} to {server_location} for user {recipient}')
+                            else:
+                                print(f"[{self.server_uuid}] Server {server_location} not connected")
+                                
+                        except Exception as e:
+                            print(f"[{self.server_uuid}] Error forwarding message to {server_location}: {e}")
+                            
                     continue
 
                 # --- FILE TRANSFER routing (DM only for now) ---
