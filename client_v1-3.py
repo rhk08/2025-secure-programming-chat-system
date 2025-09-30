@@ -12,6 +12,8 @@ import time
 import uuid
 import os
 import hashlib
+import sys
+import codec
 
 UDP_DISCOVERY_PORT = 9999
 HEARTBEAT_INTERVAL = 10
@@ -36,9 +38,14 @@ class Client:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
+        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode('utf-8')
+        
+        #allow user to specify server uri to connect to for testing purposes
+        if len(sys.argv) > 1:
+            self.server_uri = sys.argv[1]
+        else:
+            self.server_uri = None
 
-        self.server_uri = None
         self._incoming_responses = asyncio.Queue()
 
         self.message_history = {}
@@ -502,7 +509,8 @@ class Client:
 
     # ---------------- Start ----------------
     async def start(self):
-        self.discover_server()
+        if not self.server_uri:
+            self.discover_server()
         if not self.server_uri:
             return
         async with websockets.connect(self.server_uri) as ws:
