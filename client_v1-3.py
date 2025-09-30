@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.exceptions import InvalidSignature
 from copy import deepcopy
 import time 
+import uuid
 import sys
 import codec
 
@@ -18,7 +19,7 @@ HEARTBEAT_INTERVAL = 10
 class Client:
     def __init__(self):
         self.websocket = None
-        self.client_id = "Guest"
+        self.client_id = "ERROR Client_UUID not assigned!"
         self._pending_key_requests = {}
 
         # generate keys using cryptography library (same as server)
@@ -276,6 +277,14 @@ class Client:
         except websockets.exceptions.ConnectionClosed:
             print("\n[!] Connection closed")
 
+    
+    
+    
+    # --- Client commands ---
+    # TODO: Implement /list → return known online users
+    # TODO: Implement /tell <user> <text> → DM
+    # TODO: Implement /all <text> → Public channel message
+    # TODO: Implement /file <user> <path> → File transfer
     
     async def send_messages(self):
         loop = asyncio.get_event_loop()
