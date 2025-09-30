@@ -1,0 +1,29 @@
+# Servers (single)
+python3 server.py
+
+# OR with introducers
+python3 server.py 9001 --intro
+python3 server.py 9002 --intro      # optional
+python3 server.py 9000              # normal server
+
+# Clients (two terminals)
+python3 client.py
+python3 client.py
+
+# In Client B:
+whoami
+# copy UUID
+
+# In Client A:
+sendfile <ClientB_UUID> sample.txt
+sendfile <ClientB_UUID> sample10k.bin
+sendfile <ClientB_UUID> sample50k.bin
+
+# Optional chat sanity test
+chat <ClientB_UUID> hello there
+
+# Verify on Client B machine
+ls -l downloads/
+sha256sum sample.txt downloads/sample.txt
+sha256sum sample10k.bin downloads/sample10k.bin
+sha256sum sample50k.bin downloads/sample50k.bin
