@@ -23,31 +23,36 @@ import os
 # --- Load bootstrap servers ---
 with open("bootstrap_servers.json", "r") as f:
     BOOTSTRAP_SERVERS = json.load(f)
-# 
+#
+
 
 class Link:
     """Wrapper for WebSocket connections with metadata"""
+
     def __init__(self, websocket):
         self.websocket = websocket
         self.last_heartbeat = time.time()
-        
+
     async def close(self):
         await self.websocket.close()
+
 
 class Server:
     def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)
-        self.servers_websockets = {} # websocket -> server_id
-        
+        self.servers_websockets = {}  # websocket -> server_id
+
         self.local_users = {}       # user_id -> Link
         self.user_locations = {}    # user_id -> "local" | f"server_{id}"
-        
+
         # brought over from previous server implemetation
         self.connected_clients = {}     # username -> websocket (local clients)
-        self.remote_users = {}          # username -> server_uri (remote users on peers)
-        self.client_public_keys = {}    # username -> public key (local clients)
+        # username -> server_uri (remote users on peers)
+        self.remote_users = {}
+        # username -> public key (local clients)
+        self.client_public_keys = {}
 
         with open("SOCP.json", 'r') as file:
             self.JSON_base_template = json.load(file)
@@ -56,7 +61,7 @@ class Server:
         self.port = port
         self.server_uuid = str(uuid.uuid4())
         self.UDP_DISCOVERY_PORT = 9999
-        
+
         # Pick one server randomly (or some strategy)
         selected = None
         if introducer_mode:
@@ -65,10 +70,11 @@ class Server:
                     selected = entry
                     break
             if selected is None:
-                raise ValueError(f"No matching introducer found for host={host}, port={port} in BOOTSTRAP_SERVERS")
+                raise ValueError(
+                    f"No matching introducer found for host={host}, port={port} in BOOTSTRAP_SERVERS")
         else:
             self.introducers = introducers or BOOTSTRAP_SERVERS
-            
+
         # --- Load keys ---
         if introducer_mode:
             # Assume keys exist in selected bootstrap server entry
@@ -83,7 +89,7 @@ class Server:
         else:
             # Generate new keys for normal server
             self.private_key, self.public_key = codec.generate_keys()
-        
+
         # PEM + base64url for sending
         private_key_pem = self.private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -94,17 +100,18 @@ class Server:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        self.private_key_base64url = base64.urlsafe_b64encode(private_key_pem).decode("utf-8")
-        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
-        
-        
+        self.private_key_base64url = base64.urlsafe_b64encode(
+            private_key_pem).decode("utf-8")
+        self.public_key_base64url = base64.urlsafe_b64encode(
+            public_key_pem).decode("utf-8")
+
         # --- Other state ---
         self.introducer_mode = introducer_mode
         self.tasks = []                  # list of asyncio tasks
         self.server_websocket = None
         self.udp_sock = None
         self._incoming_responses = {}  # uri -> asyncio.Queue()
-        
+
         self._shutdown_event = asyncio.Event()
         self.selected_bootstrap_server = {}
 
@@ -112,10 +119,11 @@ class Server:
         # Single default public channel per server. All local users are members by default
         self.public_channel_id = "public"
         # Symmetric key material for the public channel (not used by server, delivered to clients)
-        self.public_channel_key = base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8")
+        self.public_channel_key = base64.urlsafe_b64encode(
+            os.urandom(32)).decode("utf-8")
         # Track local membership (cannot be removed per requirements)
         self.public_channel_members_local = set()
-        
+
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port}")
 
     async def cleanup_client(self, username):
@@ -137,22 +145,23 @@ class Server:
             else:
                 await queue.put(raw)
                 await asyncio.sleep(0)
-    
-         #implementation below
-    
+
+         # implementation below
+
     async def outgoing_connection_handler_handler(self, ws, uri):
         """Handle incoming messages for an outgoing websocket connection."""
         try:
             async for msg in ws:
                 frame = json.loads(msg)
-                print(f"[{self.server_uuid}] Received {frame['type']} from {frame['from']} on {uri}")
-                
+                print(
+                    f"[{self.server_uuid}] Received {frame['type']} from {frame['from']} on {uri}")
+
                 # Put the raw message into the appropriate queue
                 if uri in self._incoming_responses:
                     await self._incoming_responses[uri].put(msg)
                 else:
                     print(f"[{self.server_uuid}] No queue found for URI: {uri}")
-                    
+
         except websockets.exceptions.ConnectionClosed:
             print(f"[{self.server_uuid}] Connection closed for {uri}")
         except Exception as e:
@@ -162,32 +171,28 @@ class Server:
             if server_uuid:
                 self.servers.pop(server_uuid, None)
                 self.server_addrs.pop(server_uuid, None)
-                print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
-    
-
-    
-    
-   
-
+                print(
+                    f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
 
     # Updated incoming_connection_handler for incoming connections (servers connecting to us)
+
     async def incoming_connection_handler(self, ws):
         """Handle incoming websocket connections (servers connecting to this server)."""
         remote_host, remote_port = ws.remote_address
         uri = f"ws://{remote_host}:{remote_port}"
-    
-        
-        try:            
+
+        try:
             async for msg in ws:
                 frame = json.loads(msg)
                 msg_type = frame.get("type")
 
-                print(f"[{self.server_uuid}] Received {frame['type']} from {frame['from']}")
-                
+                print(
+                    f"[{self.server_uuid}] Received {frame['type']} from {frame['from']}")
+
                 if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
                     await self.handle_server_hello_join(frame, ws)
                     continue
-                
+
                 # --- Server ↔ Server TODOs ---
                 # TODO: Handle SERVER_ANNOUNCE (register new server + update server_addrs)
                 if msg_type == "SERVER_ANNOUNCE":
@@ -214,7 +219,7 @@ class Server:
                             except Exception:
                                 await self.cleanup_client(member_id)
                     continue
-                
+
                 # Receive public channel key from peer server and deliver to our local members
                 if msg_type == "SERVER_PUBLIC_CHANNEL_KEY":
                     payload = frame.get("payload", {}) or {}
@@ -237,19 +242,19 @@ class Server:
                                 except Exception:
                                     await self.cleanup_client(member_id)
                     continue
-                    
-            
+
                 # TODO: Handle USER_ADVERTISE (update user_locations + gossip forward)
                 if msg_type == "USER_ADVERTISE":
-                    print(f"[{self.server_uuid}] Recieved USER_ADVERTISE, Implementation Required")
+                    print(
+                        f"[{self.server_uuid}] Recieved USER_ADVERTISE, Implementation Required")
                     continue
-                
-                
+
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 if msg_type == "USER_REMOVE":
-                    print(f"[{self.server_uuid}] Recieved USER_REMOVE, Implementation Required")
+                    print(
+                        f"[{self.server_uuid}] Recieved USER_REMOVE, Implementation Required")
                     continue
-                
+
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
                 # TODO: Handle HEARTBEAT (update health state, maybe reply)
                 # TODO: Handle ACK (log/track successful delivery)
@@ -258,25 +263,26 @@ class Server:
                 # --- User ↔ Server TODOs ---
                 # TODO: Handle USER_HELLO (register local user, broadcast USER_ADVERTISE)
                 if msg_type == "USER_HELLO":
-                    
+
                     client_id = str(uuid.uuid4())
                     payload = frame.get("payload", {})
 
-                    #old
+                    # old
                     self.connected_clients[client_id] = ws
 
                     self.client_public_keys[client_id] = payload.get("pubkey")
 
-                    #new
+                    # new
                     self.local_users[client_id] = Link(ws)
                     self.user_locations[client_id] = "local"
 
-                    print(f"[{self.server_uuid}] Added {client_id} to client list")
+                    print(
+                        f"[{self.server_uuid}] Added {client_id} to client list")
 
                     # message formatted to SOCP specifications
                     message = deepcopy(self.JSON_base_template)
                     message["type"] = "USER_WELCOME"
-                    message["from"] = "Server" 
+                    message["from"] = "Server"
                     message["to"] = client_id
                     message["ts"] = time.time()
                     await ws.send(json.dumps(message))
@@ -296,8 +302,8 @@ class Server:
                     }
                     await ws.send(json.dumps(key_msg))
 
-                    #TODO: USER_ADVERTISE TO OTHER SERVERS
-                    
+                    # TODO: USER_ADVERTISE TO OTHER SERVERS
+
                     continue
 
                 # TODO: Handle MSG_DIRECT (wrap into SERVER_DELIVER or deliver locally)
@@ -310,7 +316,7 @@ class Server:
 
                     elif self.user_locations[recipient] == "local":
                         try:
-                            # send message to specified client according to SOCP format 
+                            # send message to specified client according to SOCP format
                             message = deepcopy(self.JSON_base_template)
                             message["type"] = "USER_DELIVER"
                             message["from"] = self.server_uuid
@@ -321,9 +327,10 @@ class Server:
                             payload["sender"] = sender
                             message["payload"] = payload
 
-                            #await self.connected_clients[recipient].send(json.dumps(message))
+                            # await self.connected_clients[recipient].send(json.dumps(message))
                             await self.local_users[recipient].websocket.send(json.dumps(message))
-                            print(f'DEBUG: message to {recipient} from {sender} sent')
+                            print(
+                                f'DEBUG: message to {recipient} from {sender} sent')
 
                         except:
                             await self.cleanup_client(recipient)
@@ -332,7 +339,7 @@ class Server:
                     else:
                         try:
                             recipient = self.user_locations[recipient]
-                            # send message to specified client according to SOCP format 
+                            # send message to specified client according to SOCP format
                             message = deepcopy(self.JSON_base_template)
                             message["type"] = "SERVER_DELIVER"
                             message["from"] = self.server_uuid
@@ -347,11 +354,12 @@ class Server:
                             message["payload"] = payload
 
                             await self.connected_clients[recipient].send(json.dumps(message))
-                            print(f'DEBUG: message to {recipient} from {sender} sent')
+                            print(
+                                f'DEBUG: message to {recipient} from {sender} sent')
 
                         except:
                             await self.cleanup_client(recipient)
-                        
+
                 # TODO: Handle MSG_PUBLIC_CHANNEL (fan-out to members, maintain channel state)
                 if msg_type == "MSG_PUBLIC_CHANNEL":
                     sender = frame.get("from", "")
@@ -392,7 +400,7 @@ class Server:
                             pass
 
                     continue
-                
+
                 # Creator -> Server: Set/update the public channel key and distribute
                 if msg_type == "PUBLIC_CHANNEL_KEY_SET":
                     payload = frame.get("payload", {}) or {}
@@ -400,7 +408,7 @@ class Server:
                     if isinstance(new_key, str) and new_key:
                         # Update local key
                         self.public_channel_key = new_key
-                        
+
                         # Deliver to all local members
                         for member_id in list(self.public_channel_members_local):
                             if member_id in self.local_users:
@@ -455,14 +463,14 @@ class Server:
 
                     await ws.send(json.dumps(message_json))
                     continue
-        
+
         except ConnectionClosedOK:
-        # This happens when .close() is called and shutdown is clean
+            # This happens when .close() is called and shutdown is clean
             print(f"[{self.server_uuid}] Graceful close detected from {uri}")
-        
+
         except websockets.exceptions.ConnectionClosed:
             print(f"[{self.server_uuid}] Incoming connection closed from {uri}")
-            
+
         finally:
             server_uuid = self.servers_websockets.pop(ws, None)
             if server_uuid:
@@ -471,8 +479,9 @@ class Server:
                 # Remove metadata
                 self.server_addrs.pop(server_uuid, None)
 
-            print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
-    
+            print(
+                f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
+
     async def handle_server_hello_join(self, frame, ws):
         """Handle a SERVER_HELLO_JOIN message when acting as introducer."""
         assigned_id = frame["from"]
@@ -523,7 +532,8 @@ class Server:
         try:
             # --- Verify sender signature ---
             codec.verify_payload_signature(
-                frame, codec.decode_public_key_base64url(frame["payload"]["pubkey"])
+                frame, codec.decode_public_key_base64url(
+                    frame["payload"]["pubkey"])
             )
 
             server_uuid = frame["from"]
@@ -540,7 +550,8 @@ class Server:
 
                     # Start outgoing handler task
                     task = asyncio.create_task(
-                        self.outgoing_connection_handler_handler(peer_ws, peer_uri)
+                        self.outgoing_connection_handler_handler(
+                            peer_ws, peer_uri)
                     )
                     self.tasks.append(task)
 
@@ -548,22 +559,23 @@ class Server:
                     self.server_addrs[server_uuid] = (host, port, pubkey)
                     self.servers_websockets[ws] = server_uuid
 
-                    print(f"[{self.server_uuid}] Linked to peer server {server_uuid} at {peer_uri}")
+                    print(
+                        f"[{self.server_uuid}] Linked to peer server {server_uuid} at {peer_uri}")
 
                 except Exception as e:
-                    print(f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
+                    print(
+                        f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
 
         except Exception as e:
             print(f"[{self.server_uuid}] Failed to process SERVER_ANNOUNCE: {e}")
 
-    
-    
     async def udp_discovery_server(self):
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.udp_sock.bind(('', self.UDP_DISCOVERY_PORT))
         loop = asyncio.get_event_loop()
-        print(f"[{self.server_uuid}] UDP discovery server running on port {self.UDP_DISCOVERY_PORT}")
+        print(
+            f"[{self.server_uuid}] UDP discovery server running on port {self.UDP_DISCOVERY_PORT}")
 
         try:
             while True:
@@ -571,7 +583,8 @@ class Server:
                 msg = data.decode()
 
                 if msg == "USER_ANNOUNCE":
-                    server_uri = f"ws://{socket.gethostbyname(socket.gethostname())}:{self.port}"  # LAN ip
+                    # LAN ip
+                    server_uri = f"ws://{socket.gethostbyname(socket.gethostname())}:{self.port}"
                     self.udp_sock.sendto(server_uri.encode(), addr)
 
         except asyncio.CancelledError:
@@ -581,21 +594,20 @@ class Server:
             if self.udp_sock:
                 self.udp_sock.close()
                 print(f"[{self.server_uuid}] UDP discovery server closed")
-    
-    
-    
+
     async def debug_loop(self, delay=5):
         """Periodically print all known servers for debugging."""
         try:
             while not self._shutdown_event.is_set():
                 print(f"[{self.server_uuid}] --- Server state ---")
-            
+
                 # Print Links
                 print("Servers (Links):")
                 if self.servers:
                     for server_id, link in self.servers.items():
                         # If Link has useful attributes, print them
-                        link_info = repr(link)  # or f"{link.host}:{link.port}" if those exist
+                        # or f"{link.host}:{link.port}" if those exist
+                        link_info = repr(link)
                         print(f"  {server_id}: {link_info}")
                 else:
                     print("  (no servers)")
@@ -605,23 +617,20 @@ class Server:
                 if self.server_addrs:
                     for server_id, addr in self.server_addrs.items():
                         host, port, pubkey = addr
-                        print(f"  {server_id}: host={host}, port={port}, pubkey={pubkey[:10]}...")  # show only first 10 chars
+                        # show only first 10 chars
+                        print(
+                            f"  {server_id}: host={host}, port={port}, pubkey={pubkey[:10]}...")
                 else:
                     print("  (no server addresses)")
 
-                # 
-                
+                #
+
                 print("-" * 60)
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
             print(f"[{self.server_uuid}] Debug loop cancelled")
             raise
 
-    
-    
-    
-    
-    
     async def shutdown(self):
         """Clean shutdown of all tasks and connections."""
         print(f"[{self.server_uuid}] Shutting down server...")
@@ -650,7 +659,7 @@ class Server:
         if self.server_websocket:
             self.server_websocket.close()
             await self.server_websocket.wait_closed()
-    
+
     async def start(self):
         self.server_websocket = await websockets.serve(
             self.incoming_connection_handler,
@@ -660,10 +669,9 @@ class Server:
 
         role = "INTRODUCER" if self.introducer_mode else "NORMAL"
         print(f"[{self.server_uuid}] Listening on {self.host}:{self.port} ({role})")
-        
+
         if not self.introducer_mode:
             await self.bootstrap()
-        
 
         # TODO: Start user connection handler (separate from server connections)
         # Start UDP discovery as background task
@@ -671,8 +679,7 @@ class Server:
         self.tasks.append(udp_task)
         debug_loop = asyncio.create_task(self.debug_loop())
         self.tasks.append(debug_loop)
-        
-        
+
         # Wait for shutdown event instead of hanging forever
         await self._shutdown_event.wait()
 
@@ -687,7 +694,8 @@ class Server:
                 print(f"[{self.server_uuid}] Failed bootstrap with {uri}: {e}")
 
         # If loop completes without success
-        raise ValueError(f"[{self.server_uuid}] Unable to connect to any static introducer")
+        raise ValueError(
+            f"[{self.server_uuid}] Unable to connect to any static introducer")
 
     async def _connect_to_introducer(self, uri, entry):
         """Establish connection to a single introducer and perform join handshake."""
@@ -698,7 +706,8 @@ class Server:
         print(f"[{self.server_uuid}] Connected to introducer {uri}")
 
         # Start a handler task for this connection
-        task = asyncio.create_task(self.outgoing_connection_handler_handler(ws, uri))
+        task = asyncio.create_task(
+            self.outgoing_connection_handler_handler(ws, uri))
         self.tasks.append(task)
 
         # Send join request
@@ -707,7 +716,8 @@ class Server:
         # Wait for SERVER_WELCOME
         frame = await self.wait_for_message(uri, expected_type="SERVER_WELCOME")
         if frame["type"] != "SERVER_WELCOME":
-            raise ValueError(f"Unexpected frame from introducer: {frame['type']}")
+            raise ValueError(
+                f"Unexpected frame from introducer: {frame['type']}")
 
         # Process welcome
         await self._handle_server_welcome(frame, ws, entry)
@@ -716,7 +726,8 @@ class Server:
         """Handle SERVER_WELCOME frame from introducer."""
         # Save bootstrap server
         server_uuid = frame["from"]
-        self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
+        self.server_addrs[server_uuid] = (
+            entry["host"], entry["port"], entry["public_key"])
         self.servers[server_uuid] = Link(ws)
         self.servers_websockets[ws] = server_uuid
         self.selected_bootstrap_server = entry
@@ -742,7 +753,8 @@ class Server:
             self.servers[server_uuid] = Link(peer_ws)
 
             # Start handler
-            task = asyncio.create_task(self.outgoing_connection_handler_handler(peer_ws, peer_uri))
+            task = asyncio.create_task(
+                self.outgoing_connection_handler_handler(peer_ws, peer_uri))
             self.tasks.append(task)
 
             # Record metadata
@@ -751,7 +763,8 @@ class Server:
 
             print(f"[{self.server_uuid}] Linked to peer {server_uuid} at {peer_uri}")
         except Exception as e:
-            print(f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
+            print(
+                f"[{self.server_uuid}] Failed to connect to peer {server_uuid}: {e}")
 
     def _build_hello_join(self, entry):
         """Construct SERVER_HELLO_JOIN message for introducer."""
@@ -795,17 +808,15 @@ class Server:
                 await link.websocket.send(json.dumps(announce))
                 print(f"[{self.server_uuid}] Sent SERVER_ANNOUNCE to {server_uuid}")
             except Exception as e:
-                print(f"[{self.server_uuid}] Failed to send SERVER_ANNOUNCE to {server_uuid}: {e}")
+                print(
+                    f"[{self.server_uuid}] Failed to send SERVER_ANNOUNCE to {server_uuid}: {e}")
 
-
-    
-    
     # --- Routing ---
     # TODO: Implement route_to_user(user_id, frame) per §10
     #       - If local_users[user_id] → send USER_DELIVER
     #       - Else if user_locations[user_id] == server_id → send SERVER_DELIVER
     #       - Else → send ERROR(USER_NOT_FOUND)
-    
+
     # --- Database ---
     # TODO: Implement persistent database layer per §15
     #       - register_user(user_id, pubkey, meta)
@@ -818,7 +829,7 @@ async def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9000
     introducer_mode = "--intro" in sys.argv
     server = Server(port=port, introducer_mode=introducer_mode)
-    
+
     try:
         await server.start()
     except KeyboardInterrupt:
