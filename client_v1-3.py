@@ -29,6 +29,10 @@ class Client:
         self.client_id = "ERROR Client_UUID not assigned!"
         self._pending_key_requests = {}
 
+        # friends list
+        self.friends_by_id = {}
+        self.friends_by_name = {}
+
         # Generate keys
         self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.public_key = self.private_key.public_key()
@@ -168,6 +172,8 @@ class Client:
             print("  chat <recipient> <message>   - send a message to a user")
             print("  sendfile <recipient> <path>  - send a file to a user (DM)")
             print("  history [user]               - show message history")
+            print("  add <uuid> <name>            - add a user as a friend")
+            print("  friends                      - shows a list of your friends")
             print("  whoami                       - show your current UUID")
             print("  ping                         - (placeholder)")
             print("  list                         - (placeholder)")
@@ -216,7 +222,13 @@ class Client:
                         if ciphertext:
                             plaintext = await self.decrypt_message(ciphertext)
                             self.store_message(msg, plaintext)
-                            print(f"\n[!] Message from {payload.get('sender')}:")
+
+                            # print(f"\n[!] Message from {payload.get('sender')}:")
+                            if self.friends_by_id.get(payload.get('sender')) == None:
+                                print(f"\n[!] Message received from {payload.get('sender')}:")
+                            else:
+                                print(f"\n[!] Message received from {self.friends_by_id.get(payload.get('sender'))}:")
+
                             print(plaintext)
                             print(f"[{self.client_id}] ", end="", flush=True)
                     else:
@@ -290,6 +302,36 @@ class Client:
         except websockets.exceptions.ConnectionClosed:
             print("\n[!] Connection closed")
 
+    def add_friend(self, friend_id, friend_name):
+        if len(friend_name) > 12:
+            print("Name too long!")
+            return
+
+        if friend_name == "Group":
+            print("Name cannot be 'Group'!")
+            return
+
+        # If the name is already taken by another UUID
+        if friend_name in self.friends_by_name and self.friends_by_name[friend_name] != friend_id:
+            print(f"Name {friend_name} is already taken by another user!")
+            return
+
+        # If the UUID already exists, update its name
+        if friend_id in self.friends_by_id:
+            old_name = self.friends_by_id[friend_id]
+            if old_name != friend_name:
+                # remove old name entry
+                if old_name in self.friends_by_name:
+                    del self.friends_by_name[old_name]
+                print(f"Updated friend {friend_id}: {old_name} to {friend_name}")
+
+        else:
+            print(f"Friend added: {friend_name} ({friend_id})")
+
+        # Add/update both dicts
+        self.friends_by_id[friend_id] = friend_name
+        self.friends_by_name[friend_name] = friend_id
+
     # ---------------- Commands ----------------
     async def send_messages(self):
         loop = asyncio.get_event_loop()
@@ -309,6 +351,7 @@ class Client:
                 print("[i] Available commands:")
                 print("  chat <recipient> <message>   - send a message to a user")
                 print("  sendfile <recipient> <path>  - send a file to a user (DM)")
+                print("  add <uuid> <name>          - add a user as a friend")
                 print("  history [user]               - show message history")
                 print("  whoami                       - show your current UUID")
                 print("  quit | q                     - exit")
@@ -325,12 +368,19 @@ class Client:
                         if count > 0:
                             print(f"  - {user}: {count} unread")
                     continue
-                target_user = cmd_parts[1]
+
+                target_friend = self.friends_by_name.get(cmd_parts[1])
+                if target_friend != None:
+                    target_user = target_friend
+                else:
+                    target_user = cmd_parts[1]
+
+                target_friend = cmd_parts[1]
                 target_user_history = self.message_history.get(target_user, [])
                 if not target_user_history:
-                    print(f"[i] No message history with {target_user}.")
+                    print(f"[i] No message history with {target_friend}.")
                     continue
-                print(f"[i] Message history with {target_user}:")
+                print(f"[i] Message history with {target_friend}:")
                 for m in target_user_history:
                     ts = m.get("timestamp", "")
                     sender = m.get("sender", "")
@@ -343,11 +393,40 @@ class Client:
                 self.unread_messages[target_user] = 0
                 continue
 
+            # ----- Add -----
+            elif cmd == "add":
+                if len(cmd_parts) < 3:
+                    print("[!] Usage: add <name> <uuid>")
+                    continue
+                
+                self.add_friend(cmd_parts[1], cmd_parts[2])
+
+            # ----- Friends -----
+            elif cmd == "friends":
+                if not self.friends_by_id:
+                    print("[i] You have no friends added yet.")
+                else:
+                    print("\n[i] Friends list:")
+                    print(f"{'Name'} | {'UUID':<40}")
+                    print("-" * 55)
+                    for friend_id, friend_name in self.friends_by_id.items():
+                        print(f"{friend_name} | {friend_id:<40}")
+                continue
+
+
             elif cmd == "chat":
                 if len(cmd_parts) < 3:
                     print("[!] Usage: chat <recipient> <message>")
                     continue
-                recipient = cmd_parts[1]
+                
+                # Check if recipient is on friends list
+                friend_receiving = self.friends_by_name.get(cmd_parts[1])
+                if friend_receiving != None:
+                    recipient = friend_receiving
+                    friend_receiving = cmd_parts[1]
+                else:
+                    recipient = cmd_parts[1]
+
                 message = cmd_parts[2]
 
                 # request recipient pubkey
@@ -367,7 +446,7 @@ class Client:
                         recipient_pubkey_b64url = payload.get("recipient_pub")
                         break
                 if not recipient_pubkey_b64url:
-                    print(f"[!] Cannot obtain public key for {recipient}")
+                    print(f"[!] Cannot obtain public key for {friend_receiving}")
                     continue
 
                 encrypted_payload = await self.encrypt_message(message, recipient_pubkey_b64url)
