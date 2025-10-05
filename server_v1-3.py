@@ -49,6 +49,8 @@ class Server:
         self.server_uuid = str(uuid.uuid4())
         self.UDP_DISCOVERY_PORT = 9999
 
+        self.seen_messages = set()
+
         # Pick introducer
         selected = None
         if introducer_mode:
@@ -153,6 +155,7 @@ class Server:
 
                 if uri in self._incoming_responses:
                     await self._incoming_responses[uri].put(msg)
+                    
         except websockets.exceptions.ConnectionClosed:
             print(f"[{self.server_uuid}] Outgoing connection closed for {uri}")
         finally:
@@ -187,6 +190,7 @@ class Server:
 
                 # --- Server ↔ Introducer join ---
                 if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
+                    # SERVER_HELLO_JOIN sending and recieving needs verification
                     await self.handle_server_hello_join(frame, ws)
                     continue
 
@@ -196,6 +200,7 @@ class Server:
                     
             
                 # Handle USER_ADVERTISE (update user_locations + gossip forward)
+                
                 if msg_type == "USER_ADVERTISE":
                     payload = frame.get("payload")
                     user_location = payload.get("server_id")
@@ -266,11 +271,23 @@ class Server:
                 
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
                 if msg_type == "SERVER_DELIVER":
+
+                    # duplicate message check
+                    msg_id = f"{frame.get('from')}:{frame.get('ts')}:{payload.get('user_id')}"
+                    if msg_id in self.seen_messages:
+                        continue
+                    self.seen_messages.add(msg_id)
+                    
+                    # Limit set size
+                    if len(self.seen_messages) > 10000:
+                        self.seen_messages = set(list(self.seen_messages)[-5000:])
+
                     payload = frame.get("payload", {})
                     sender = payload.get("sender")
                     ciphertext = payload.get("ciphertext")
                     sender_pub = payload.get("sender_pub")
                     content_sig = payload.get("content_sig")
+                    forwarding_server = frame.get("from")
 
                     # Find the target user in the payload or frame
                     target_user = None
@@ -284,7 +301,11 @@ class Server:
                     # Check if target user is local
                     if target_user in self.local_users and self.user_locations.get(target_user) == "local":
                         try:
-                            # 1) TODO: verify signature
+                            # 1) verify signature
+                            _, _, pubkey = self.server_addrs[forwarding_server] 
+
+                            pubkey_obj = codec.decode_public_key_base64url(pubkey)
+                            codec.verify_payload_signature(frame, pubkey_obj)
 
                             # Convert SERVER_DELIVER to USER_DELIVER for local client
                             user_deliver_msg = deepcopy(self.JSON_base_template)
@@ -298,7 +319,10 @@ class Server:
                                 "sender_pub": sender_pub,
                                 "content_sig": content_sig
                             }
-                            # user_deliver_msg["sig"] = server sig 
+                            user_deliver_msg["sig"] = codec.generate_payload_signature(
+                                user_deliver_msg,
+                                self.private_key
+                            )
                             
                             await self.local_users[target_user].websocket.send(json.dumps(user_deliver_msg))
                             print(f'[{self.server_uuid}] Delivered message to local user {target_user}')
@@ -306,15 +330,19 @@ class Server:
                         except Exception as e:
                             print(f"[{self.server_uuid}] Error delivering to local user {target_user}: {e}")
                             await self.cleanup_client(target_user)
-                    else:
-                        print(f"[{self.server_uuid}] Received SERVER_DELIVER for non-local user: {target_user}")
+                    else: 
+                        print(f"THIS HAS YET TO BE TESTED AS IT SHOULD NOT OCCUR WITH BOOTSTRAP SETUP - [{self.server_uuid}] Received SERVER_DELIVER for non-local user: {target_user}")
+
+                        for server_id, link in self.servers.items():
+                            if server_id != forwarding_server:  # Don't send back to the origin
+                                try:
+                                    await link.websocket.send(json.dumps(frame))
+                                    print(f"[{self.server_uuid}] Forwarded SERVER_DELIVER for recipient {user_id} to server {server_id}")
+                                except Exception as e:
+                                    print(f"[{self.server_uuid}] Failed to forward SERVER_DELIVER to {server_id}: {e}")
                     
                     continue
-
-                # TODO: Handle HEARTBEAT (update health state, maybe reply)
-                # TODO: Handle ACK (log/track successful delivery)
-                # TODO: Handle ERROR (parse code, log, maybe correct state)
-
+                
                 # --- User ↔ Server TODOs ---
                 # TODO: Handle USER_HELLO (register local user, broadcast USER_ADVERTISE)
                 if msg_type == "USER_HELLO":
@@ -343,6 +371,9 @@ class Server:
                     now_ts = int(time.time())
                     await self.db.ensure_public_group(now_ts)
                     await self.db.add_member_to_group("public", client_id, pubkey_b64url, now_ts)
+                    
+                    # TODO 
+                    await self._handle_public_member_join(frame)
 
                     # welcome
                     message = deepcopy(self.JSON_base_template)
@@ -350,6 +381,9 @@ class Server:
                     message["from"] = self.server_uuid
                     message["to"] = client_id
                     message["ts"] = time.time()
+                    message["payload"] = {
+                        "server_pub_key": self.public_key_base64url
+                    }
                     await ws.send(json.dumps(message))
 
                     # USER_ADVERTISE TO OTHER SERVERS
@@ -378,14 +412,15 @@ class Server:
 
                     continue
 
+                
+                
+                
                 # --- Direct message routing ---
                 if msg_type == "MSG_DIRECT":
                     recipient = frame.get("to", "")
                     sender = frame.get("from", "")
 
                     if recipient not in self.user_locations:
-                        # NOTE: cross-server routing requires user_locations[recipient] = <server_id>.
-                        # You haven't implemented USER_ADVERTISE yet, so remote routing won't work.
                         await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
                         continue
 
@@ -428,7 +463,10 @@ class Server:
                             
                             server_deliver_msg["payload"] = payload
 
-                            #server_deliver_msg["sig"] = server sig over payload
+                            server_deliver_msg["sig"] = codec.generate_payload_signature(
+                                server_deliver_msg,
+                                self.private_key
+                            )
 
                             if server_location in self.servers:
                                 await self.servers[server_location].websocket.send(json.dumps(server_deliver_msg))
@@ -624,6 +662,32 @@ class Server:
 
                     continue
 
+                # --- List users ---
+                if msg_type == "LIST_REQUEST":
+                    requester = frame.get("from")
+
+                    if not requester:
+                        print(f"[{self.server_uuid}] LIST_REQUEST missing 'from' field")
+                        continue
+
+                    users = []
+
+                    if self.user_locations:
+                        users.extend(self.user_locations.keys())
+
+                    message_json = deepcopy(self.JSON_base_template)
+                    message_json['type'] = "LIST_RESPONSE"
+                    message_json['from'] = self.server_uuid 
+                    message_json['to'] = requester
+                    message_json['ts'] = time.time()
+                    message_json['payload'] = {
+                        "users": users
+                    }
+                    await ws.send(json.dumps(message_json))
+                    print(f"[{self.server_uuid}] Sent all users to {requester}")
+
+                    continue
+                
      
         except ConnectionClosedOK:
             print(f"[{self.server_uuid}] Graceful close from {uri}")
@@ -643,6 +707,15 @@ class Server:
                     self.user_locations.pop(client_id, None)
 
             print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
+
+    async def _handle_public_member_join(self, frame):
+        # TODO PUBLIC_CHANNEL_ADD
+
+        # TODO PUBLIC_CHANNEL_UPDATED
+        
+        
+        
+        return
 
     async def handle_server_hello_join(self, frame, ws):
         assigned_id = frame["from"]
@@ -778,6 +851,7 @@ class Server:
         print(f"[{self.server_uuid}] Listening on {self.host}:{self.port}")
 
         if not self.introducer_mode:
+            # needs signing
             await self.bootstrap()
 
         udp_task = asyncio.create_task(self.udp_discovery_server())
@@ -803,22 +877,32 @@ class Server:
 
     async def _connect_to_introducer(self, uri, entry):
         self._incoming_responses[uri] = asyncio.Queue()
+        
+        # Create outgoing connection to introducer
         ws = await websockets.connect(uri)
         print(f"[{self.server_uuid}] Connected introducer {uri}")
         task = asyncio.create_task(self.outgoing_connection_handler(ws, uri))
         self.tasks.append(task)
+        
+        # create the hello join message and wait for response
         await ws.send(json.dumps(self._build_hello_join(entry)))
         frame = await self.wait_for_message(uri, expected_type="SERVER_WELCOME")
+        
+        
         await self._handle_server_welcome(frame, ws, entry)
 
     async def _handle_server_welcome(self, frame, ws, entry):
+        # save server welcome
         server_uuid = frame["from"]
         self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
         self.servers[server_uuid] = Link(ws)
         self.servers_websockets[ws] = server_uuid
         self.selected_bootstrap_server = entry
+        
+        # create out going connections for each client supplied in the payload
         for client in frame["payload"].get("clients", []):
             await self._connect_to_peer(client)
+            
         await self._broadcast_server_announce()
 
     async def _connect_to_peer(self, client):

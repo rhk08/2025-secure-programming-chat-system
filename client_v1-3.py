@@ -33,6 +33,9 @@ class Client:
         self.friends_by_id = {}
         self.friends_by_name = {}
 
+        #server pub key
+        self.server_pub_key = None
+
         # Generate keys
         self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.public_key = self.private_key.public_key()
@@ -166,19 +169,24 @@ class Client:
             await self.websocket.send(json.dumps(message))
 
             response = json.loads(await self.websocket.recv())
-            self.client_id = response.get("to")
+            if response.get("type") == "USER_WELCOME":
+                self.client_id = response.get("to")
+                payload = response.get("payload")
+                self.server_pub_key = payload.get("server_pub_key") 
 
-            print("[i] Available commands:")
-            print("  chat <recipient> <message>   - send a message to a user")
-            print("  sendfile <recipient> <path>  - send a file to a user (DM)")
-            print("  history [user]               - show message history")
-            print("  add <uuid> <name>            - add a user as a friend")
-            print("  friends                      - shows a list of your friends")
-            print("  whoami                       - show your current UUID")
-            print("  ping                         - (placeholder)")
-            print("  list                         - (placeholder)")
-            print("  quit | q                     - exit")
-            print("  help | -h                    - show this help")
+                print("[i] Available commands:")
+                print("  chat <recipient> <message>   - send a message to a user")
+                print("  sendfile <recipient> <path>  - send a file to a user (DM)")
+                print("  all <message>                - send a group message")
+                print("  add <uuid> <nickname>        - add a user as a friend")
+                print("  friends                      - shows a list of your friends")
+                print("  whoami                       - show your current UUID")
+                print("  list                         - shows all current users")
+                print("  quit | q                     - exit")
+                print("  help | -h                    - show this help")
+            else:
+                print("Error, please retry connection")
+
             return
 
     def store_message(self, msg, plaintext):
@@ -210,12 +218,28 @@ class Client:
                 msg = json.loads(json_message)
 
                 # Queueable responses
-                if msg.get("type") == "PUB_KEY":
+                if msg.get("type") == "PUB_KEY" or msg.get("type") == "LIST_RESPONSE":
                     await self._incoming_responses.put(msg)
                     continue
 
                 # Chat messages
                 if msg.get("type") == "USER_DELIVER":
+       
+                    #verify server signature for transport layer security
+                    sig = msg.get("sig")
+                    if not sig or not hasattr(self, 'server_pub_key'):
+                        print("[DEBUG] no server signature or server pub key not recorded")
+                        return False
+                    
+                    try:
+                        server_pubkey_obj = codec.decode_public_key_base64url(self.server_pub_key)
+                        codec.verify_payload_signature(msg, server_pubkey_obj)
+
+                    except Exception as e:
+                        print(f"[DEBUG] Server signature verification failed: {e}")
+                        return False
+        
+                    #verify content signature
                     if await self.verify_message(msg):
                         payload = msg.get("payload")
                         ciphertext = payload.get("ciphertext")
@@ -351,10 +375,14 @@ class Client:
                 print("[i] Available commands:")
                 print("  chat <recipient> <message>   - send a message to a user")
                 print("  sendfile <recipient> <path>  - send a file to a user (DM)")
-                print("  add <uuid> <name>          - add a user as a friend")
-                print("  history [user]               - show message history")
+                print("  all <message>                - send a group message")
+                print("  add <uuid> <nickname>        - add a user as a friend")
+                print("  friends                      - shows a list of your friends")
                 print("  whoami                       - show your current UUID")
+                print("  list                         - shows all current users")
                 print("  quit | q                     - exit")
+                print("  help | -h                    - show this help")
+
                 continue
 
             elif cmd == "whoami":
@@ -413,7 +441,6 @@ class Client:
                         print(f"{friend_name} | {friend_id:<40}")
                 continue
 
-
             elif cmd == "chat":
                 if len(cmd_parts) < 3:
                     print("[!] Usage: chat <recipient> <message>")
@@ -469,6 +496,33 @@ class Client:
                 self.store_message(msg_direct, message)
                 await self.websocket.send(json.dumps(msg_direct))
                 print("[i] Message sent successfully!")
+                continue
+
+            elif cmd == "list":
+                list_request = deepcopy(self.JSON_base_template)
+                list_request["type"] = "LIST_REQUEST"
+                list_request["from"] = self.client_id
+                list_request["to"] = self.server_uri
+                list_request["ts"] = int(time.time() * 1000)
+                await self.websocket.send(json.dumps(list_request))
+
+                users_list = None
+
+                while True:
+                    msg = await self._incoming_responses.get()
+                    if msg.get("type") == "LIST_RESPONSE":
+                        payload = msg.get("payload", {})
+                        users_list = payload.get("users", [])
+                        break
+
+                if users_list:
+                    print("Users available to chat:")
+                    for user in users_list:
+                        if user != self.client_id:
+                            print(user)
+                else:
+                    print("No users online")
+
                 continue
 
             elif cmd == "sendfile":
