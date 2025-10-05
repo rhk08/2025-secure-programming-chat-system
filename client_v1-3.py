@@ -57,6 +57,10 @@ class Client:
         self.file_rx = {}  # file_id -> {name,size,sha256,received:int,parts:dict}
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+        # --- Public channel state ---
+        self.public_channel_id = "public"
+        self.public_channel_key = None
+
     # ---------------- Load JSON template from file ----------------
     def _load_json(self, file_path):
         with open(file_path, "r") as file:
@@ -208,10 +212,28 @@ class Client:
                     await self._incoming_responses.put(msg)
                     continue
 
+                # Handle public channel key
+                if msg.get("type") == "PUBLIC_CHANNEL_KEY":
+                    payload = msg.get("payload", {}) or {}
+                    self.public_channel_key = payload.get("channel_key")
+                    print("[i] Joined public channel. Key received.")
+                    continue
+
                 # Chat messages
                 if msg.get("type") == "USER_DELIVER":
+                    payload = msg.get("payload", {}) or {}
+                    
+                    # Public channel messages are plaintext (no ciphertext/signature)
+                    if not payload.get("ciphertext") and payload.get("channel_id") == self.public_channel_id:
+                        content = payload.get("content")
+                        sender = payload.get("sender") or "Unknown"
+                        self.store_message(msg, content or json.dumps(payload))
+                        print(f"\n[Public] {sender}: {content}")
+                        print(f"[{self.client_id}] ", end="", flush=True)
+                        continue
+                    
+                    # Otherwise expect encrypted direct message
                     if await self.verify_message(msg):
-                        payload = msg.get("payload")
                         ciphertext = payload.get("ciphertext")
                         if ciphertext:
                             plaintext = await self.decrypt_message(ciphertext)
@@ -308,6 +330,7 @@ class Client:
             if cmd in ("help", "-h"):
                 print("[i] Available commands:")
                 print("  chat <recipient> <message>   - send a message to a user")
+                print("  all <message>                - send a message to public channel")
                 print("  sendfile <recipient> <path>  - send a file to a user (DM)")
                 print("  history [user]               - show message history")
                 print("  whoami                       - show your current UUID")
@@ -341,6 +364,21 @@ class Client:
                     print(f"[{ts}]{new_tag} {prefix}: {content}")
                     m["seen"] = True
                 self.unread_messages[target_user] = 0
+                continue
+
+            elif cmd == "all":
+                if len(cmd_parts) < 2:
+                    print("[!] Usage: all <message>")
+                    continue
+                message = cmd_parts[1]
+                msg_pub = deepcopy(self.JSON_base_template)
+                msg_pub['type'] = "MSG_PUBLIC_CHANNEL"
+                msg_pub['from'] = self.client_id
+                msg_pub['to'] = "*"
+                msg_pub['ts'] = time.time()
+                msg_pub['payload'] = {"content": message}
+                await self.websocket.send(json.dumps(msg_pub))
+                print("[i] Public message sent.")
                 continue
 
             elif cmd == "chat":
