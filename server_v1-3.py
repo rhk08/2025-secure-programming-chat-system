@@ -623,7 +623,34 @@ class Server:
                             await ws.send(json.dumps(error_msg))
 
                     continue
+                
+                # --- List users ---
+                if msg_type == "LIST_REQUEST":
+                    requester = frame.get("from")
 
+                    if not requester:
+                        print(f"[{self.server_uuid}] LIST_REQUEST missing 'from' field")
+                        continue
+
+                    users = []
+
+                    if self.user_locations:
+                        users.extend(self.user_locations.keys())
+
+                    message_json = deepcopy(self.JSON_base_template)
+                    message_json['type'] = "LIST_RESPONSE"
+                    message_json['from'] = self.server_uuid 
+                    message_json['to'] = requester
+                    message_json['ts'] = time.time()
+                    message_json['payload'] = {
+                        "users": users
+                    }
+                    await ws.send(json.dumps(message_json))
+                    print(f"[{self.server_uuid}] Sent all users to {requester}")
+                    for user in users:
+                        print(user)
+
+                    continue
      
         except ConnectionClosedOK:
             print(f"[{self.server_uuid}] Graceful close from {uri}")

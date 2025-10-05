@@ -204,7 +204,7 @@ class Client:
                 msg = json.loads(json_message)
 
                 # Queueable responses
-                if msg.get("type") == "PUB_KEY":
+                if msg.get("type") == "PUB_KEY" or msg.get("type") == "LIST_RESPONSE":
                     await self._incoming_responses.put(msg)
                     continue
 
@@ -311,6 +311,7 @@ class Client:
                 print("  sendfile <recipient> <path>  - send a file to a user (DM)")
                 print("  history [user]               - show message history")
                 print("  whoami                       - show your current UUID")
+                print("  list                         - (placeholder)")
                 print("  quit | q                     - exit")
                 continue
 
@@ -399,6 +400,33 @@ class Client:
                 recipient = cmd_parts[1]
                 path = cmd_parts[2]
                 await self.send_file_dm(recipient, path)
+                continue
+
+            elif cmd == "list":
+                list_request = deepcopy(self.JSON_base_template)
+                list_request["type"] = "LIST_REQUEST"
+                list_request["from"] = self.client_id
+                list_request["to"] = self.server_uri
+                list_request["ts"] = int(time.time() * 1000)
+                await self.websocket.send(json.dumps(list_request))
+
+                users_list = None
+
+                while True:
+                    msg = await self._incoming_responses.get()
+                    if msg.get("type") == "LIST_RESPONSE":
+                        print("RECEIVED LIST RESPONSE")
+                        payload = msg.get("payload", {})
+                        users_list = payload.get("users", [])
+                        break
+
+                if users_list:
+                    print("Users available to chat:\n")
+                    for user in users_list:
+                        print(user)
+                else:
+                    print("No users online")
+
                 continue
 
             else:

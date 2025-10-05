@@ -6,7 +6,6 @@
     git clone <repository_url>
     cd 2025-secure-programming-chat-system
 
-
 ## 2. Create a virtual environment
 
     # On Windows
@@ -37,6 +36,10 @@ To run the server as the introducer, use:
 Start the P2P client with:
 
     python client_v1-3.py
+
+For testing purposes, to join the client to a specific server, start with:
+
+    python client_v1-3.py ws://[host]:[port]
 
 Enter your username when prompted.
 
