@@ -265,12 +265,19 @@ class Server:
                     continue
                 
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
+                
+                # Vulnerability should sit in here for 3. ("Missing duplicate-message suppression –> replay acceptance.")
                 if msg_type == "SERVER_DELIVER":
                     payload = frame.get("payload", {})
                     sender = payload.get("sender")
                     ciphertext = payload.get("ciphertext")
                     sender_pub = payload.get("sender_pub")
                     content_sig = payload.get("content_sig")
+
+                    # Vulnerability 3: Missing duplicate-message suppression
+                    # this is WHAT WOULD technically occur and block duplicates if we implemented it
+                    # msg_id = (frame.get("from"), frame.get("ts"), payload.get("user_id"))
+                    # self._incoming_responses[msg_id] = asyncio.Queue()
 
                     # Find the target user in the payload or frame
                     target_user = None
@@ -786,7 +793,9 @@ class Server:
         self.tasks.append(debug_loop)
         heartbeat_loop = asyncio.create_task(self.heartbeat_loop())
         self.tasks.append(heartbeat_loop)
-        
+        # This is to get all online users btw
+        # online_users_task = asyncio.create_task(self.list_online_users_loop())
+        # self.tasks.append(online_users_task)
         
         # Wait for shutdown event instead of hanging forever
         await self._shutdown_event.wait()
@@ -863,6 +872,31 @@ class Server:
                 print(f"[{self.server_uuid}] Sent SERVER_ANNOUNCE to {server_uuid}")
             except Exception:
                 pass
+
+    # Ryan this is to see all online users and their status, im not too sure where to call it though? (I used AI for this one cause idr understand this part)
+    def list_all_online_users(self):
+        online_users = []
+        for user_id, location in self.user_locations.items():
+            # this is just to label the users as either local or remote so we know who's online
+            status = "LOCAL" if location == "local" else f"REMOTE ({location})"
+            online_users.append((user_id, status))
+        return online_users
+
+
+    # This is another implemnetation that will repeat itself every 10 seconds btw, you can choose which to use
+    # async def list_online_users_loop(self, delay=10):
+    #     try:
+    #         while not self._shutdown_event.is_set():
+    #             users = self.list_all_online_users()
+    #             print(f"[{self.server_uuid}] ONLINE USERS ({len(users)}):")
+    #             for user_id, status in users:
+    #                 print(f" - {user_id} [{status}]")
+    #             print("-" * 50)
+    #             await asyncio.sleep(delay)
+    #     except asyncio.CancelledError:
+    #         pass
+
+
 
 
 async def main():
