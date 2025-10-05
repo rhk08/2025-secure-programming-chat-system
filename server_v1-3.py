@@ -35,7 +35,7 @@ class Link:
         await self.websocket.close()
 
 class Server:
-    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
+    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False):
         # --- Server state ---
         self.servers = {}           # server_id -> Link
         self.server_addrs = {}      # server_id -> (host, port, pubkey)

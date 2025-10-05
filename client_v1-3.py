@@ -280,7 +280,7 @@ class Client:
                                 'sender')) or payload.get('sender') or 'Unknown'
                             self.store_message(
                                 msg, content or json.dumps(payload))
-                            print(f"\n[Public] {sender_label}: {content}")
+                            print(f"\n[!] Group message received from {sender_label}: {content}")
                             print(
                                 f"[{self.client_id}] Enter command or message ('help' for commands): ", end="", flush=True)
                             continue
