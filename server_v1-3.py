@@ -293,7 +293,8 @@ class Server:
                                 out_msg["ts"] = frame.get("ts", time.time())
                                 out_msg["payload"] = deliver_payload
                                 await self.local_users[member_id].websocket.send(json.dumps(out_msg))
-                                print(f"[{self.server_uuid}] Delivered public channel message from peer to {member_id}")
+                                print(
+                                    f"[{self.server_uuid}] Delivered public channel message from peer to {member_id}")
                             except Exception:
                                 await self.cleanup_client(member_id)
                     continue
@@ -423,7 +424,7 @@ class Server:
                 if msg_type == "MSG_PUBLIC_CHANNEL":
                     sender = frame.get("from", "")
                     payload = frame.get("payload", {}) or {}
-                    
+
                     # Distribute to all local public channel members
                     for member_id in list(self.public_channel_members_local):
                         if member_id in self.local_users and member_id != sender:
@@ -432,18 +433,21 @@ class Server:
                                 deliver_msg["type"] = "USER_DELIVER"
                                 deliver_msg["from"] = self.server_uuid
                                 deliver_msg["to"] = member_id
-                                deliver_msg["ts"] = frame.get("ts", time.time())
+                                deliver_msg["ts"] = frame.get(
+                                    "ts", time.time())
                                 deliver_msg["payload"] = {
                                     "channel_id": self.public_channel_id,
                                     "content": payload.get("content", ""),
                                     "sender": sender
                                 }
                                 await self.local_users[member_id].websocket.send(json.dumps(deliver_msg))
-                                print(f"[{self.server_uuid}] Delivered public channel message to {member_id}")
+                                print(
+                                    f"[{self.server_uuid}] Delivered public channel message to {member_id}")
                             except Exception as e:
-                                print(f"[{self.server_uuid}] Error delivering to {member_id}: {e}")
+                                print(
+                                    f"[{self.server_uuid}] Error delivering to {member_id}: {e}")
                                 await self.cleanup_client(member_id)
-                    
+
                     # Forward to peer servers
                     for server_id, link in self.servers.items():
                         try:
@@ -458,10 +462,12 @@ class Server:
                                 "sender": sender
                             }
                             await link.websocket.send(json.dumps(server_msg))
-                            print(f"[{self.server_uuid}] Forwarded public channel message to {server_id}")
+                            print(
+                                f"[{self.server_uuid}] Forwarded public channel message to {server_id}")
                         except Exception as e:
-                            print(f"[{self.server_uuid}] Error forwarding to {server_id}: {e}")
-                    
+                            print(
+                                f"[{self.server_uuid}] Error forwarding to {server_id}: {e}")
+
                     continue
 
                 # --- Direct message routing ---
