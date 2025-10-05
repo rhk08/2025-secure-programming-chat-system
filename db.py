@@ -94,7 +94,8 @@ class ChatDB:
                   meta=excluded.meta,
                   version=excluded.version
                 """,
-                (user_id, pubkey_b64url, privkey_store, pake_password, meta_json, version),
+                (user_id, pubkey_b64url, privkey_store,
+                 pake_password, meta_json, version),
             )
             await db.commit()
 
@@ -109,6 +110,16 @@ class ChatDB:
             cur = await db.execute("SELECT user_id FROM users")
             rows = await cur.fetchall()
             return [r[0] for r in rows]
+
+    async def get_group_member_wrapped_key(self, group_id: str, member_id: str) -> Optional[str]:
+        """Get the wrapped key for a group member."""
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT wrapped_key FROM group_members WHERE group_id=? AND member_id=?",
+                (group_id, member_id)
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None
 
     # ---------------- GROUPS (PUBLIC) ----------------
 

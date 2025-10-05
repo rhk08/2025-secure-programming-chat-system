@@ -6,6 +6,8 @@ import base64
 from datetime import datetime
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 from copy import deepcopy
 import time
@@ -30,7 +32,8 @@ class Client:
         self._pending_key_requests = {}
 
         # Generate keys
-        self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048)
         self.public_key = self.private_key.public_key()
 
         # Export public key in base64url(PEM)
@@ -38,9 +41,10 @@ class Client:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode('utf-8')
-        
-        #allow user to specify server uri to connect to for testing purposes
+        self.public_key_base64url = base64.urlsafe_b64encode(
+            public_key_pem).decode('utf-8')
+
+        # allow user to specify server uri to connect to for testing purposes
         if len(sys.argv) > 1:
             self.server_uri = sys.argv[1]
         else:
@@ -73,7 +77,8 @@ class Client:
             self.server_uri = data.decode()
             # normalize common localhost alias on some distros
             if self.server_uri.startswith("ws://127.0.1.1:"):
-                self.server_uri = self.server_uri.replace("127.0.1.1", "127.0.0.1", 1)
+                self.server_uri = self.server_uri.replace(
+                    "127.0.1.1", "127.0.0.1", 1)
             print(f"[i] Discovered server at {self.server_uri}")
         except socket.timeout:
             print("[!] No server found on LAN")
@@ -82,7 +87,8 @@ class Client:
 
     # ---------------- RSA (text) encryption/decryption ----------------
     async def encrypt_message(self, message, recipient_pubkey_b64url):
-        pem_bytes = base64.urlsafe_b64decode(recipient_pubkey_b64url.encode("utf-8"))
+        pem_bytes = base64.urlsafe_b64decode(
+            recipient_pubkey_b64url.encode("utf-8"))
         recipient_pubkey = serialization.load_pem_public_key(pem_bytes)
         ciphertext = recipient_pubkey.encrypt(
             message.encode("utf-8"),
@@ -100,16 +106,123 @@ class Client:
         )
         return plaintext.decode("utf-8")
 
+    async def encrypt_with_group_key(self, message, group_key_b64url):
+        """
+        Encrypt a message using a group key (AES encryption).
+        """
+        group_key_bytes = base64.urlsafe_b64decode(
+            group_key_b64url.encode("utf-8"))
+
+        # Generate a random IV
+        iv = os.urandom(16)
+
+        # Create cipher
+        cipher = Cipher(algorithms.AES(group_key_bytes),
+                        modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+
+        # Pad the message to block size
+        message_bytes = message.encode("utf-8")
+        padding_length = 16 - (len(message_bytes) % 16)
+        padded_message = message_bytes + \
+            bytes([padding_length] * padding_length)
+
+        # Encrypt
+        ciphertext = encryptor.update(padded_message) + encryptor.finalize()
+
+        # Combine IV and ciphertext
+        encrypted_data = iv + ciphertext
+        return base64.b64encode(encrypted_data).decode("utf-8")
+
+    async def decrypt_with_group_key(self, encrypted_message_b64, group_key_b64url):
+        """
+        Decrypt a message using a group key (AES decryption).
+        """
+        group_key_bytes = base64.urlsafe_b64decode(
+            group_key_b64url.encode("utf-8"))
+        encrypted_data = base64.b64decode(encrypted_message_b64)
+
+        # Extract IV and ciphertext
+        iv = encrypted_data[:16]
+        ciphertext = encrypted_data[16:]
+
+        # Create cipher
+        cipher = Cipher(algorithms.AES(group_key_bytes),
+                        modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+
+        # Decrypt
+        padded_message = decryptor.update(ciphertext) + decryptor.finalize()
+
+        # Remove padding
+        padding_length = padded_message[-1]
+        plaintext = padded_message[:-padding_length]
+
+        return plaintext.decode("utf-8")
+
     # ---------------- Sign / verify ----------------
     async def sign_message(self, sender_privkey, ciphertext, sender_id, recipient_id, timestamp):
         ts_str = f"{timestamp:.6f}"
-        sign_data = f"{ciphertext}|{sender_id}|{recipient_id}|{ts_str}".encode("utf-8")
+        sign_data = f"{ciphertext}|{sender_id}|{recipient_id}|{ts_str}".encode(
+            "utf-8")
         signature = sender_privkey.sign(
             sign_data,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH),
             hashes.SHA256(),
         )
         return base64.urlsafe_b64encode(signature).decode("utf-8")
+
+    # ---------------- Public channel key management ----------------
+    async def get_public_channel_key(self):
+        """
+        Request the public channel key from the server.
+        Returns the unwrapped group key for encryption.
+        """
+        # Request public channel key
+        key_request = deepcopy(self.JSON_base_template)
+        key_request["type"] = "PUBLIC_CHANNEL_KEY_REQUEST"
+        key_request["from"] = self.client_id
+        key_request["to"] = "Server"
+        key_request["ts"] = time.time()
+        key_request["payload"] = {"channel": "public"}
+        await self.websocket.send(json.dumps(key_request))
+
+        # Wait for response
+        while True:
+            msg = await self._incoming_responses.get()
+            if msg.get("type") == "PUBLIC_CHANNEL_KEY":
+                payload = msg.get("payload", {})
+                if payload.get("channel") == "public":
+                    wrapped_key = payload.get("wrapped_key")
+                    if wrapped_key:
+                        # Unwrap the group key
+                        return await self.unwrap_group_key(wrapped_key)
+            elif msg.get("type") == "ERROR":
+                print(
+                    f"[!] Error getting public channel key: {msg.get('payload', {}).get('message', 'Unknown error')}")
+                return None
+
+    async def unwrap_group_key(self, wrapped_key_b64: str) -> str:
+        """
+        Unwrap the group key using our private key.
+        Returns the group key in base64url format for encryption.
+        """
+        try:
+            wrapped_key = base64.b64decode(wrapped_key_b64)
+            group_key = self.private_key.decrypt(
+                wrapped_key,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None,
+                ),
+            )
+            # Return as base64url for consistency with other keys
+            return base64.urlsafe_b64encode(group_key).decode("utf-8")
+        except Exception as e:
+            print(f"[!] Error unwrapping group key: {e}")
+            return None
 
     async def verify_message(self, msg_direct):
         try:
@@ -128,13 +241,15 @@ class Client:
             sender_pubkey_obj = serialization.load_pem_public_key(pem_bytes)
 
             ts_str = f"{ts:.6f}"
-            sign_data = f"{ciphertext}|{sender}|{recipient}|{ts_str}".encode("utf-8")
+            sign_data = f"{ciphertext}|{sender}|{recipient}|{ts_str}".encode(
+                "utf-8")
             signature = base64.urlsafe_b64decode(signature_b64url)
 
             sender_pubkey_obj.verify(
                 signature,
                 sign_data,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.MAX_LENGTH),
                 hashes.SHA256(),
             )
             return True
@@ -166,6 +281,7 @@ class Client:
 
             print("[i] Available commands:")
             print("  chat <recipient> <message>   - send a message to a user")
+            print("  public <message>             - send a message to public channel")
             print("  sendfile <recipient> <path>  - send a file to a user (DM)")
             print("  history [user]               - show message history")
             print("  whoami                       - show your current UUID")
@@ -208,19 +324,43 @@ class Client:
                     await self._incoming_responses.put(msg)
                     continue
 
+                if msg.get("type") == "PUBLIC_CHANNEL_KEY":
+                    await self._incoming_responses.put(msg)
+                    continue
+
                 # Chat messages
                 if msg.get("type") == "USER_DELIVER":
                     if await self.verify_message(msg):
                         payload = msg.get("payload")
                         ciphertext = payload.get("ciphertext")
+                        channel = payload.get("channel")
                         if ciphertext:
-                            plaintext = await self.decrypt_message(ciphertext)
+                            if channel == "public":
+                                # For public channel, we need to get the group key
+                                group_key = await self.get_public_channel_key()
+                                if group_key:
+                                    plaintext = await self.decrypt_with_group_key(ciphertext, group_key)
+                                else:
+                                    print(
+                                        "[!] Cannot decrypt public channel message - no group key")
+                                    continue
+                            else:
+                                plaintext = await self.decrypt_message(ciphertext)
+
                             self.store_message(msg, plaintext)
-                            print(f"\n[!] Message from {payload.get('sender')}:")
-                            print(plaintext)
+
+                            # Display message with channel info
+                            if channel == "public":
+                                print(
+                                    f"\n[!] [PUBLIC] {payload.get('sender')}: {plaintext}")
+                            else:
+                                print(
+                                    f"\n[!] Message from {payload.get('sender')}:")
+                                print(plaintext)
                             print(f"[{self.client_id}] ", end="", flush=True)
                     else:
-                        print("[! DEBUG] Message received but signature verification failed")
+                        print(
+                            "[! DEBUG] Message received but signature verification failed")
                     continue
 
                 # Heartbeat
@@ -241,7 +381,8 @@ class Client:
                         "received": 0,
                         "parts": {},
                     }
-                    print(f"[i] Incoming file: {self.file_rx[fid]['name']} ({self.file_rx[fid]['size']} bytes)")
+                    print(
+                        f"[i] Incoming file: {self.file_rx[fid]['name']} ({self.file_rx[fid]['size']} bytes)")
                     continue
 
                 if msg.get("type") == "FILE_CHUNK":
@@ -252,7 +393,8 @@ class Client:
                     if not fid or ct is None:
                         continue
                     if fid not in self.file_rx:
-                        self.file_rx[fid] = {"name": f"file-{fid}", "size": 0, "sha256": "", "received": 0, "parts": {}}
+                        self.file_rx[fid] = {
+                            "name": f"file-{fid}", "size": 0, "sha256": "", "received": 0, "parts": {}}
                     try:
                         plain = await self.decrypt_blob(ct)
                     except Exception as e:
@@ -268,12 +410,15 @@ class Client:
                     if not fid or fid not in self.file_rx:
                         continue
                     entry = self.file_rx[fid]
-                    ordered = [entry["parts"][k] for k in sorted(entry["parts"].keys())]
+                    ordered = [entry["parts"][k]
+                               for k in sorted(entry["parts"].keys())]
                     blob = b"".join(ordered)
 
-                    ok_size = (entry["size"] == 0) or (len(blob) == entry["size"])
+                    ok_size = (entry["size"] == 0) or (
+                        len(blob) == entry["size"])
                     sha_hex = hashlib.sha256(blob).hexdigest()
-                    ok_sha = (entry["sha256"] == "" or entry["sha256"] == sha_hex)
+                    ok_sha = (entry["sha256"] ==
+                              "" or entry["sha256"] == sha_hex)
 
                     out_path = os.path.join(DOWNLOAD_DIR, entry["name"])
                     with open(out_path, "wb") as f:
@@ -281,9 +426,11 @@ class Client:
 
                     print(f"[i] File saved: {out_path}")
                     if not ok_size:
-                        print(f"[!] Size mismatch: got {len(blob)}, expected {entry['size']}")
+                        print(
+                            f"[!] Size mismatch: got {len(blob)}, expected {entry['size']}")
                     if not ok_sha:
-                        print(f"[!] SHA-256 mismatch: got {sha_hex}, expected {entry['sha256']}")
+                        print(
+                            f"[!] SHA-256 mismatch: got {sha_hex}, expected {entry['sha256']}")
                     del self.file_rx[fid]
                     continue
 
@@ -308,6 +455,8 @@ class Client:
             if cmd in ("help", "-h"):
                 print("[i] Available commands:")
                 print("  chat <recipient> <message>   - send a message to a user")
+                print(
+                    "  public <message>             - send a message to public channel")
                 print("  sendfile <recipient> <path>  - send a file to a user (DM)")
                 print("  history [user]               - show message history")
                 print("  whoami                       - show your current UUID")
@@ -392,6 +541,41 @@ class Client:
                 print("[i] Message sent successfully!")
                 continue
 
+            elif cmd == "public":
+                if len(cmd_parts) < 2:
+                    print("[!] Usage: public <message>")
+                    continue
+                message = cmd_parts[1]
+
+                # Get public channel key from server
+                group_key = await self.get_public_channel_key()
+                if not group_key:
+                    print("[!] Cannot obtain public channel key")
+                    continue
+
+                encrypted_payload = await self.encrypt_with_group_key(message, group_key)
+                timestamp = int(time.time() * 1000)
+                signature_b64url = await self.sign_message(
+                    self.private_key, encrypted_payload, self.client_id, "public", timestamp
+                )
+
+                msg_public = deepcopy(self.JSON_base_template)
+                msg_public["type"] = "MSG_PUBLIC_CHANNEL"
+                msg_public["from"] = self.client_id
+                msg_public["to"] = "public"
+                msg_public["ts"] = timestamp
+                msg_public["payload"] = {
+                    "ciphertext": encrypted_payload,
+                    "sender_pub": self.public_key_base64url,
+                    "content_sig": signature_b64url,
+                }
+
+                # Store message in history with "public" as the conversation partner
+                self.store_message(msg_public, message)
+                await self.websocket.send(json.dumps(msg_public))
+                print("[i] Public channel message sent successfully!")
+                continue
+
             elif cmd == "sendfile":
                 if len(cmd_parts) < 3:
                     print("[!] Usage: sendfile <recipient> <path>")
@@ -407,7 +591,8 @@ class Client:
 
     # ---------------- File crypto helpers ----------------
     async def encrypt_blob_for_recipient(self, data: bytes, recipient_pubkey_b64url: str) -> str:
-        pem_bytes = base64.urlsafe_b64decode(recipient_pubkey_b64url.encode("utf-8"))
+        pem_bytes = base64.urlsafe_b64decode(
+            recipient_pubkey_b64url.encode("utf-8"))
         recipient_pubkey = serialization.load_pem_public_key(pem_bytes)
         ciphertext = recipient_pubkey.encrypt(
             data,

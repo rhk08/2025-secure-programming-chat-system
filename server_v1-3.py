@@ -23,6 +23,7 @@ with open("bootstrap_servers.json", "r") as f:
 
 class Link:
     """Wrapper for WebSocket connections with metadata"""
+
     def __init__(self, websocket):
         self.websocket = websocket
         self.last_heartbeat = time.time()
@@ -36,7 +37,7 @@ class Server:
         # --- Server state ---
         self.servers = {}            # server_id -> Link
         self.server_addrs = {}       # server_id -> (host, port, pubkey)
-        self.servers_websockets = {} # websocket -> server_id
+        self.servers_websockets = {}  # websocket -> server_id
 
         self.local_users = {}        # user_id -> Link
         self.user_locations = {}     # user_id -> "local" | server_id
@@ -83,8 +84,10 @@ class Server:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        self.private_key_base64url = base64.urlsafe_b64encode(private_key_pem).decode("utf-8")
-        self.public_key_base64url = base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
+        self.private_key_base64url = base64.urlsafe_b64encode(
+            private_key_pem).decode("utf-8")
+        self.public_key_base64url = base64.urlsafe_b64encode(
+            public_key_pem).decode("utf-8")
 
         # --- Other state ---
         self.introducer_mode = introducer_mode
@@ -108,7 +111,7 @@ class Server:
         # Notify peers USER_REMOVE to other servers
         user_remove_message = deepcopy(self.JSON_base_template)
         user_remove_message["type"] = "USER_REMOVE"
-        user_remove_message["from"] = self.server_uuid 
+        user_remove_message["from"] = self.server_uuid
         user_remove_message["to"] = "*"
         user_remove_message["ts"] = time.time()
         user_remove_message["payload"] = {
@@ -119,16 +122,80 @@ class Server:
             user_remove_message,
             self.private_key
         )
-                    
+
         # Broadcast USER_REMOVE to all connected servers
         for server_id, link in self.servers.items():
             try:
                 await link.websocket.send(json.dumps(user_remove_message))
-                print(f"[{self.server_uuid}] Sent USER_REMOVE to server {server_id}")
+                print(
+                    f"[{self.server_uuid}] Sent USER_REMOVE to server {server_id}")
             except Exception as e:
-                    print(f"[{self.server_uuid}] Failed to send USER_REMOVE to {server_id}: {e}")
+                print(
+                    f"[{self.server_uuid}] Failed to send USER_REMOVE to {server_id}: {e}")
 
-            continue 
+            continue
+
+    async def handle_public_channel_message(self, frame, sender):
+        """
+        Handle MSG_PUBLIC_CHANNEL messages by distributing to all local users
+        and forwarding to all connected servers.
+        """
+        try:
+            # Get all local users (they are automatically in public channel)
+            for user_id, link in self.local_users.items():
+                if user_id != sender:  # Don't send back to sender
+                    try:
+                        # Create USER_DELIVER message for local user
+                        message = deepcopy(self.JSON_base_template)
+                        message["type"] = "USER_DELIVER"
+                        message["from"] = self.server_uuid
+                        message["to"] = user_id
+                        message["ts"] = frame.get("ts")
+                        payload = frame.get("payload", {}) or {}
+                        payload["sender"] = sender
+                        # Mark as public channel message
+                        payload["channel"] = "public"
+                        message["payload"] = payload
+
+                        await link.websocket.send(json.dumps(message))
+                        print(
+                            f"DEBUG: MSG_PUBLIC_CHANNEL delivered to local user {user_id} from {sender}")
+                    except Exception as e:
+                        print(
+                            f"[{self.server_uuid}] Error delivering public channel message to {user_id}: {e}")
+                        await self.cleanup_client(user_id)
+
+            # Forward to all connected servers
+            for server_id, link in self.servers.items():
+                try:
+                    # Create SERVER_DELIVER message for public channel
+                    server_deliver_msg = deepcopy(self.JSON_base_template)
+                    server_deliver_msg["type"] = "SERVER_DELIVER"
+                    server_deliver_msg["from"] = self.server_uuid
+                    server_deliver_msg["to"] = server_id
+                    server_deliver_msg["ts"] = frame.get("ts")
+
+                    # Include original payload + metadata
+                    payload = frame.get("payload", {})
+                    if not isinstance(payload, dict):
+                        payload = payload
+
+                    payload["sender"] = sender
+                    # Mark as public channel message
+                    payload["channel"] = "public"
+                    payload["original_ts"] = frame.get("ts")
+
+                    server_deliver_msg["payload"] = payload
+
+                    await link.websocket.send(json.dumps(server_deliver_msg))
+                    print(
+                        f'[{self.server_uuid}] Forwarded public channel message from {sender} to server {server_id}')
+                except Exception as e:
+                    print(
+                        f"[{self.server_uuid}] Error forwarding public channel message to {server_id}: {e}")
+
+        except Exception as e:
+            print(f"[{self.server_uuid}] Error handling public channel message: {e}")
 
     async def wait_for_message(self, uri, expected_type):
         queue = self._incoming_responses[uri]
@@ -149,7 +216,8 @@ class Server:
                     frame = json.loads(msg)
                 except Exception:
                     continue
-                print(f"[{self.server_uuid}] Received {frame.get('type')} from {frame.get('from')} on {uri}")
+                print(
+                    f"[{self.server_uuid}] Received {frame.get('type')} from {frame.get('from')} on {uri}")
 
                 if uri in self._incoming_responses:
                     await self._incoming_responses[uri].put(msg)
@@ -160,10 +228,11 @@ class Server:
             if server_uuid:
                 self.servers.pop(server_uuid, None)
                 self.server_addrs.pop(server_uuid, None)
-                print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
-    
+                print(
+                    f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
 
     # Updated incoming_connection_handler for incoming connections (servers connecting to us)
+
     async def incoming_connection_handler(self, ws):
         """Handle incoming websocket connections (servers connecting to this server)."""
         remote_host, remote_port = ws.remote_address
@@ -174,8 +243,8 @@ class Server:
             link = self.servers.get(server_uuid)
             if link:
                 link.last_heartbeat = time.time()
-        
-        try:            
+
+        try:
             async for msg in ws:
                 try:
                     frame = json.loads(msg)
@@ -183,7 +252,8 @@ class Server:
                     continue
 
                 msg_type = frame.get("type")
-                print(f"[{self.server_uuid}] Received {msg_type} from {frame.get('from')}")
+                print(
+                    f"[{self.server_uuid}] Received {msg_type} from {frame.get('from')}")
 
                 # --- Server ↔ Introducer join ---
                 if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
@@ -193,52 +263,54 @@ class Server:
                 if msg_type == "SERVER_ANNOUNCE":
                     await self.handle_server_announce(frame, ws)
                     continue
-                    
-            
+
                 # Handle USER_ADVERTISE (update user_locations + gossip forward)
                 if msg_type == "USER_ADVERTISE":
                     payload = frame.get("payload")
                     user_location = payload.get("server_id")
                     user_id = payload.get("user_id")
 
-                    # 1) Verify server signature 
-                    _, _, pubkey = self.server_addrs[user_location] 
+                    # 1) Verify server signature
+                    _, _, pubkey = self.server_addrs[user_location]
 
                     pubkey_obj = codec.decode_public_key_base64url(pubkey)
                     codec.verify_payload_signature(frame, pubkey_obj)
 
-                    #TODO: error handling for if verification fails
+                    # TODO: error handling for if verification fails
 
                     # only add to user locations and forward user advertise if we havent seen this user before
                     if user_id not in self.user_locations:
-                        # 2) If verified, add to list 
+                        # 2) If verified, add to list
                         self.user_locations[user_id] = user_location
-                        # 3) Forward message to other servers (gossip) 
+                        # 3) Forward message to other servers (gossip)
                         for server_id, link in self.servers.items():
                             if server_id != user_location:  # Don't send back to the origin
                                 try:
                                     await link.websocket.send(json.dumps(frame))
-                                    print(f"[{self.server_uuid}] Forwarded USER_ADVERTISE for {user_id} to server {server_id}")
+                                    print(
+                                        f"[{self.server_uuid}] Forwarded USER_ADVERTISE for {user_id} to server {server_id}")
                                 except Exception as e:
-                                    print(f"[{self.server_uuid}] Failed to forward USER_ADVERTISE to {server_id}: {e}")
-                        
-                        print(f"[debug] self.user_locations[{user_id}] = {self.user_locations[user_id]}")
+                                    print(
+                                        f"[{self.server_uuid}] Failed to forward USER_ADVERTISE to {server_id}: {e}")
+
+                        print(
+                            f"[debug] self.user_locations[{user_id}] = {self.user_locations[user_id]}")
 
                         # TODO: 4) Notify my clients a new user has joined
 
                     continue
-                
+
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 if msg_type == "USER_REMOVE":
                     # only remove and forward if we haven't done so yet
                     if user_id in self.user_locations:
-                        # 1) Verify server signature 
-                        _, _, pubkey = self.server_addrs[user_location] 
+                        # 1) Verify server signature
+                        _, _, pubkey = self.server_addrs[user_location]
 
                         pubkey_obj = codec.decode_public_key_base64url(pubkey)
                         codec.verify_payload_signature(frame, pubkey_obj)
 
-                        #TODO: error handling for if verification fails
+                        # TODO: error handling for if verification fails
 
                         # 2) remove
                         payload = frame.get("payload")
@@ -249,45 +321,80 @@ class Server:
                         self.user_locations.pop(user_id, None)
                         self.server_addrs.pop(user_id, None)
                         print(f"[-] Removed client: {user_id}")
-                        
+
                         # 3) Forward message to other servers (gossip)
                         for server_id, link in self.servers.items():
                             if server_id != user_location:  # Don't send back to the origin
                                 try:
                                     await link.websocket.send(json.dumps(frame))
-                                    print(f"[{self.server_uuid}] Forwarded USER_REMOVE for {user_id} to server {server_id}")
+                                    print(
+                                        f"[{self.server_uuid}] Forwarded USER_REMOVE for {user_id} to server {server_id}")
                                 except Exception as e:
-                                    print(f"[{self.server_uuid}] Failed to forward USER_REMOVE to {server_id}: {e}")
-                        
+                                    print(
+                                        f"[{self.server_uuid}] Failed to forward USER_REMOVE to {server_id}: {e}")
+
                         print(f"[debug] removed user: {user_id}")
 
-                        # TODO: 4) Notify my clients a new user has joined                        
+                        # TODO: 4) Notify my clients a new user has joined
                     continue
-                
+
                 # TODO: Handle SERVER_DELIVER (forward to local user or to correct server)
                 if msg_type == "SERVER_DELIVER":
                     payload = frame.get("payload", {})
                     sender = payload.get("sender")
+                    channel = payload.get("channel")
                     ciphertext = payload.get("ciphertext")
                     sender_pub = payload.get("sender_pub")
                     content_sig = payload.get("content_sig")
 
-                    # Find the target user in the payload or frame
+                    # Handle public channel messages
+                    if channel == "public":
+                        # Distribute to all local users
+                        for user_id, link in self.local_users.items():
+                            if user_id != sender:  # Don't send back to sender
+                                try:
+                                    user_deliver_msg = deepcopy(
+                                        self.JSON_base_template)
+                                    user_deliver_msg["type"] = "USER_DELIVER"
+                                    user_deliver_msg["from"] = self.server_uuid
+                                    user_deliver_msg["to"] = user_id
+                                    user_deliver_msg["ts"] = frame.get("ts")
+                                    user_deliver_msg["payload"] = {
+                                        "sender": sender,
+                                        "ciphertext": ciphertext,
+                                        "sender_pub": sender_pub,
+                                        "content_sig": content_sig,
+                                        "channel": "public"
+                                    }
+
+                                    await link.websocket.send(json.dumps(user_deliver_msg))
+                                    print(
+                                        f'[{self.server_uuid}] Delivered public channel message to local user {user_id}')
+
+                                except Exception as e:
+                                    print(
+                                        f"[{self.server_uuid}] Error delivering public channel message to {user_id}: {e}")
+                                    await self.cleanup_client(user_id)
+                        continue
+
+                    # Handle direct messages
                     target_user = None
                     if "user_id" in payload:
                         target_user = payload["user_id"]
                     else:
                         # If not in payload, might need to extract from original message
-                        print(f"[{self.server_uuid}] SERVER_DELIVER missing target_user in payload")
+                        print(
+                            f"[{self.server_uuid}] SERVER_DELIVER missing target_user in payload")
                         continue
-                    
+
                     # Check if target user is local
                     if target_user in self.local_users and self.user_locations.get(target_user) == "local":
                         try:
                             # 1) TODO: verify signature
 
                             # Convert SERVER_DELIVER to USER_DELIVER for local client
-                            user_deliver_msg = deepcopy(self.JSON_base_template)
+                            user_deliver_msg = deepcopy(
+                                self.JSON_base_template)
                             user_deliver_msg["type"] = "USER_DELIVER"
                             user_deliver_msg["from"] = self.server_uuid
                             user_deliver_msg["to"] = target_user
@@ -298,17 +405,20 @@ class Server:
                                 "sender_pub": sender_pub,
                                 "content_sig": content_sig
                             }
-                            # user_deliver_msg["sig"] = server sig 
-                            
+                            # user_deliver_msg["sig"] = server sig
+
                             await self.local_users[target_user].websocket.send(json.dumps(user_deliver_msg))
-                            print(f'[{self.server_uuid}] Delivered message to local user {target_user}')
-                            
+                            print(
+                                f'[{self.server_uuid}] Delivered message to local user {target_user}')
+
                         except Exception as e:
-                            print(f"[{self.server_uuid}] Error delivering to local user {target_user}: {e}")
+                            print(
+                                f"[{self.server_uuid}] Error delivering to local user {target_user}: {e}")
                             await self.cleanup_client(target_user)
                     else:
-                        print(f"[{self.server_uuid}] Received SERVER_DELIVER for non-local user: {target_user}")
-                    
+                        print(
+                            f"[{self.server_uuid}] Received SERVER_DELIVER for non-local user: {target_user}")
+
                     continue
 
                 # TODO: Handle HEARTBEAT (update health state, maybe reply)
@@ -355,7 +465,7 @@ class Server:
                     # USER_ADVERTISE TO OTHER SERVERS
                     user_advertise_message = deepcopy(self.JSON_base_template)
                     user_advertise_message["type"] = "USER_ADVERTISE"
-                    user_advertise_message["from"] = self.server_uuid 
+                    user_advertise_message["from"] = self.server_uuid
                     user_advertise_message["to"] = "*"
                     user_advertise_message["ts"] = time.time()
                     user_advertise_message["payload"] = {
@@ -367,14 +477,16 @@ class Server:
                         user_advertise_message,
                         self.private_key
                     )
-                    
+
                     # Broadcast USER_ADVERTISE to all connected servers
                     for server_id, link in self.servers.items():
                         try:
                             await link.websocket.send(json.dumps(user_advertise_message))
-                            print(f"[{self.server_uuid}] Sent USER_ADVERTISE to server {server_id}")
+                            print(
+                                f"[{self.server_uuid}] Sent USER_ADVERTISE to server {server_id}")
                         except Exception as e:
-                            print(f"[{self.server_uuid}] Failed to send USER_ADVERTISE to {server_id}: {e}")
+                            print(
+                                f"[{self.server_uuid}] Failed to send USER_ADVERTISE to {server_id}: {e}")
 
                     continue
 
@@ -401,44 +513,56 @@ class Server:
                             payload["sender"] = sender
                             message["payload"] = payload
                             await self.local_users[recipient].websocket.send(json.dumps(message))
-                            print(f"DEBUG: MSG_DIRECT delivered to {recipient} from {sender}")
+                            print(
+                                f"DEBUG: MSG_DIRECT delivered to {recipient} from {sender}")
                         except Exception:
                             await self.cleanup_client(recipient)
-                            
-                            
+
                     else:
                         try:
                             server_location = self.user_locations[recipient]
-                            
+
                             # Create SERVER_DELIVER message
-                            server_deliver_msg = deepcopy(self.JSON_base_template)
+                            server_deliver_msg = deepcopy(
+                                self.JSON_base_template)
                             server_deliver_msg["type"] = "SERVER_DELIVER"
                             server_deliver_msg["from"] = self.server_uuid
                             server_deliver_msg["to"] = server_location
-                            server_deliver_msg["ts"] = frame.get("ts") # not sure if this is the correct way...
+                            # not sure if this is the correct way...
+                            server_deliver_msg["ts"] = frame.get("ts")
 
                             # Include original payload + metadata
                             payload = frame.get("payload", {})
                             if not isinstance(payload, dict):
                                 payload = payload
-                            
+
                             payload["sender"] = sender
-                            payload["user_id"] = recipient  
-                            payload["original_ts"] = frame.get("ts")  # Preserve original timestamp
-                            
+                            payload["user_id"] = recipient
+                            payload["original_ts"] = frame.get(
+                                "ts")  # Preserve original timestamp
+
                             server_deliver_msg["payload"] = payload
 
-                            #server_deliver_msg["sig"] = server sig over payload
+                            # server_deliver_msg["sig"] = server sig over payload
 
                             if server_location in self.servers:
                                 await self.servers[server_location].websocket.send(json.dumps(server_deliver_msg))
-                                print(f'[{self.server_uuid}] Forwarded message from {sender} to {server_location} for user {recipient}')
+                                print(
+                                    f'[{self.server_uuid}] Forwarded message from {sender} to {server_location} for user {recipient}')
                             else:
-                                print(f"[{self.server_uuid}] Server {server_location} not connected")
-                                
+                                print(
+                                    f"[{self.server_uuid}] Server {server_location} not connected")
+
                         except Exception as e:
-                            print(f"[{self.server_uuid}] Error forwarding message to {server_location}: {e}")
-                            
+                            print(
+                                f"[{self.server_uuid}] Error forwarding message to {server_location}: {e}")
+
+                    continue
+
+                # --- Public channel message routing ---
+                if msg_type == "MSG_PUBLIC_CHANNEL":
+                    sender = frame.get("from", "")
+                    await self.handle_public_channel_message(frame, sender)
                     continue
 
                 # --- FILE TRANSFER routing (DM only for now) ---
@@ -463,7 +587,8 @@ class Server:
                     if self.user_locations[recipient] == "local":
                         try:
                             await self.local_users[recipient].websocket.send(json.dumps(frame))
-                            print(f"DEBUG: FILE_START routed to {recipient} from {sender}")
+                            print(
+                                f"DEBUG: FILE_START routed to {recipient} from {sender}")
                         except Exception:
                             await self.cleanup_client(recipient)
                     else:
@@ -473,8 +598,10 @@ class Server:
                             if not link:
                                 await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-                            await link.websocket.send(json.dumps(frame))  # forward unchanged
-                            print(f"DEBUG: FILE_START forwarded to server {target_server_id} for user {recipient}")
+                            # forward unchanged
+                            await link.websocket.send(json.dumps(frame))
+                            print(
+                                f"DEBUG: FILE_START forwarded to server {target_server_id} for user {recipient}")
                         except Exception:
                             await self.cleanup_client(recipient)
                     continue
@@ -497,7 +624,8 @@ class Server:
                             if not link:
                                 await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                            # forward unchanged
+                            await link.websocket.send(json.dumps(frame))
                         except Exception:
                             await self.cleanup_client(recipient)
                     continue
@@ -513,7 +641,8 @@ class Server:
                     if self.user_locations[recipient] == "local":
                         try:
                             await self.local_users[recipient].websocket.send(json.dumps(frame))
-                            print(f"DEBUG: FILE_END delivered to {recipient} from {sender}")
+                            print(
+                                f"DEBUG: FILE_END delivered to {recipient} from {sender}")
                         except Exception:
                             await self.cleanup_client(recipient)
                     else:
@@ -523,10 +652,66 @@ class Server:
                             if not link:
                                 await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-                            await link.websocket.send(json.dumps(frame))  # forward unchanged
-                            print(f"DEBUG: FILE_END forwarded to server {target_server_id} for user {recipient}")
+                            # forward unchanged
+                            await link.websocket.send(json.dumps(frame))
+                            print(
+                                f"DEBUG: FILE_END forwarded to server {target_server_id} for user {recipient}")
                         except Exception:
                             await self.cleanup_client(recipient)
+                    continue
+
+                # --- Public channel key request ---
+                if msg_type == "PUBLIC_CHANNEL_KEY_REQUEST":
+                    payload = frame.get("payload") or {}
+                    channel = payload.get("channel", "public")
+                    requester = frame.get("from")
+
+                    if channel == "public":
+                        # Get the wrapped key for the public channel for this user
+                        wrapped_key = await self.db.get_group_member_wrapped_key("public", requester)
+
+                        if wrapped_key:
+                            # Send the wrapped key back to the client
+                            message_json = deepcopy(self.JSON_base_template)
+                            message_json['type'] = "PUBLIC_CHANNEL_KEY"
+                            message_json['from'] = self.server_uuid
+                            message_json['to'] = requester
+                            message_json['ts'] = time.time()
+                            message_json['payload'] = {
+                                "channel": "public",
+                                "wrapped_key": wrapped_key
+                            }
+                            await ws.send(json.dumps(message_json))
+                            print(
+                                f"[{self.server_uuid}] Sent public channel key to {requester}")
+                        else:
+                            # User not in public channel, add them
+                            user_pubkey = await self.db.get_user_pubkey(requester)
+                            if user_pubkey:
+                                await self.db.add_member_to_group("public", requester, user_pubkey, int(time.time()))
+                                wrapped_key = await self.db.get_group_member_wrapped_key("public", requester)
+
+                                message_json = deepcopy(
+                                    self.JSON_base_template)
+                                message_json['type'] = "PUBLIC_CHANNEL_KEY"
+                                message_json['from'] = self.server_uuid
+                                message_json['to'] = requester
+                                message_json['ts'] = time.time()
+                                message_json['payload'] = {
+                                    "channel": "public",
+                                    "wrapped_key": wrapped_key
+                                }
+                                await ws.send(json.dumps(message_json))
+                                print(
+                                    f"[{self.server_uuid}] Added {requester} to public channel and sent key")
+                            else:
+                                error_msg = deepcopy(self.JSON_base_template)
+                                error_msg["type"] = "ERROR"
+                                error_msg["from"] = self.server_uuid
+                                error_msg["to"] = requester
+                                error_msg["payload"] = {
+                                    "code": "USER_NOT_FOUND", "message": f"User {requester} not found"}
+                                await ws.send(json.dumps(error_msg))
                     continue
 
                 # --- Pubkey lookup from DB ---
@@ -542,7 +727,7 @@ class Server:
                         # We have the key locally - send it back
                         message_json = deepcopy(self.JSON_base_template)
                         message_json['type'] = "PUB_KEY"
-                        message_json['from'] = self.server_uuid 
+                        message_json['from'] = self.server_uuid
                         message_json['to'] = requester
                         message_json['ts'] = time.time()
                         message_json['payload'] = {
@@ -550,9 +735,10 @@ class Server:
                             "recipient_uuid": target
                         }
                         await ws.send(json.dumps(message_json))
-                        print(f"[{self.server_uuid}] Sent local public key for {target}")
-                        
-                    else: 
+                        print(
+                            f"[{self.server_uuid}] Sent local public key for {target}")
+
+                    else:
                         # Get pubkey for user connected to another server
                         try:
                             server_location = self.user_locations.get(target)
@@ -562,15 +748,17 @@ class Server:
                                 error_msg["type"] = "ERROR"
                                 error_msg["from"] = self.server_uuid
                                 error_msg["to"] = requester
-                                error_msg["payload"] = {"code": "USER_NOT_FOUND", "message": f"User {target} not found"}
+                                error_msg["payload"] = {
+                                    "code": "USER_NOT_FOUND", "message": f"User {target} not found"}
                                 await ws.send(json.dumps(error_msg))
                                 continue
-                                
+
                             if server_location not in self.servers:
-                                print(f"[{self.server_uuid}] Server {server_location} not connected")
+                                print(
+                                    f"[{self.server_uuid}] Server {server_location} not connected")
                                 continue
 
-                            # Create the request message  
+                            # Create the request message
                             pubkey_request = deepcopy(self.JSON_base_template)
                             pubkey_request['type'] = "PUB_KEY_REQUEST"
                             pubkey_request['from'] = self.server_uuid
@@ -579,26 +767,29 @@ class Server:
                             pubkey_request['payload'] = {
                                 "recipient_uuid": target  # Fixed: was 'recipient' before
                             }
-                            
+
                             # Send to the correct server
                             server_uri = f"ws://{self.server_addrs[server_location][0]}:{self.server_addrs[server_location][1]}"
-                            
+
                             # Make sure we have a response queue for this URI
                             if server_uri not in self._incoming_responses:
-                                self._incoming_responses[server_uri] = asyncio.Queue()
-                                
+                                self._incoming_responses[server_uri] = asyncio.Queue(
+                                )
+
                             await self.servers[server_location].websocket.send(json.dumps(pubkey_request))
-                            print(f"[{self.server_uuid}] Sent PUB_KEY_REQUEST to {server_location} for {target}")
+                            print(
+                                f"[{self.server_uuid}] Sent PUB_KEY_REQUEST to {server_location} for {target}")
 
                             # Wait for PUB_KEY response from that specific server
                             response_msg = await self.wait_for_message(server_uri, "PUB_KEY")
                             response_payload = response_msg.get("payload", {})
-                            
+
                             if response_payload.get("recipient_uuid") == target:
                                 pub_key = response_payload.get("recipient_pub")
-                                
+
                                 # Forward the response back to the original requester
-                                message_json = deepcopy(self.JSON_base_template)
+                                message_json = deepcopy(
+                                    self.JSON_base_template)
                                 message_json['type'] = "PUB_KEY"
                                 message_json['from'] = self.server_uuid
                                 message_json['to'] = requester
@@ -608,23 +799,26 @@ class Server:
                                     "recipient_uuid": target
                                 }
                                 await ws.send(json.dumps(message_json))
-                                print(f"[{self.server_uuid}] Forwarded public key for {target} to {requester}")
+                                print(
+                                    f"[{self.server_uuid}] Forwarded public key for {target} to {requester}")
                             else:
-                                print(f"[{self.server_uuid}] Received wrong PUB_KEY response")
+                                print(
+                                    f"[{self.server_uuid}] Received wrong PUB_KEY response")
 
                         except Exception as e:
-                            print(f"[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {e}")
+                            print(
+                                f"[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {e}")
                             # Send error back to requester
                             error_msg = deepcopy(self.JSON_base_template)
                             error_msg["type"] = "ERROR"
                             error_msg["from"] = self.server_uuid
                             error_msg["to"] = requester
-                            error_msg["payload"] = {"code": "PUBKEY_REQUEST_FAILED", "message": str(e)}
+                            error_msg["payload"] = {
+                                "code": "PUBKEY_REQUEST_FAILED", "message": str(e)}
                             await ws.send(json.dumps(error_msg))
 
                     continue
 
-     
         except ConnectionClosedOK:
             print(f"[{self.server_uuid}] Graceful close from {uri}")
         except websockets.exceptions.ConnectionClosed:
@@ -642,13 +836,15 @@ class Server:
                     self.local_users.pop(client_id, None)
                     self.user_locations.pop(client_id, None)
 
-            print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
+            print(
+                f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
 
     async def handle_server_hello_join(self, frame, ws):
         assigned_id = frame["from"]
         clients_list = []
         for server_id, (host, port, pubkey) in self.server_addrs.items():
-            clients_list.append({"user_id": server_id, "host": host, "port": port, "pubkey": pubkey})
+            clients_list.append(
+                {"user_id": server_id, "host": host, "port": port, "pubkey": pubkey})
         welcome = {
             "type": "SERVER_WELCOME",
             "from": self.server_uuid,
@@ -663,7 +859,8 @@ class Server:
     async def handle_server_announce(self, frame, ws):
         try:
             codec.verify_payload_signature(
-                frame, codec.decode_public_key_base64url(frame["payload"]["pubkey"])
+                frame, codec.decode_public_key_base64url(
+                    frame["payload"]["pubkey"])
             )
             server_uuid = frame["from"]
             host = frame["payload"]["host"]
@@ -673,26 +870,30 @@ class Server:
             if server_uuid not in self.servers:
                 peer_ws = await websockets.connect(peer_uri)
                 self.servers[server_uuid] = Link(peer_ws)
-                task = asyncio.create_task(self.outgoing_connection_handler(peer_ws, peer_uri))
+                task = asyncio.create_task(
+                    self.outgoing_connection_handler(peer_ws, peer_uri))
                 self.tasks.append(task)
                 self.server_addrs[server_uuid] = (host, port, pubkey)
                 self.servers_websockets[peer_ws] = server_uuid
-                print(f"[{self.server_uuid}] Linked to peer {server_uuid} at {peer_uri}")
+                print(
+                    f"[{self.server_uuid}] Linked to peer {server_uuid} at {peer_uri}")
         except Exception as e:
             print(f"[{self.server_uuid}] Failed to process SERVER_ANNOUNCE: {e}")
-    
+
     async def udp_discovery_server(self):
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.udp_sock.bind(('', self.UDP_DISCOVERY_PORT))
         loop = asyncio.get_event_loop()
-        print(f"[{self.server_uuid}] UDP discovery running on {self.UDP_DISCOVERY_PORT}")
+        print(
+            f"[{self.server_uuid}] UDP discovery running on {self.UDP_DISCOVERY_PORT}")
         try:
             while True:
                 data, addr = await loop.run_in_executor(None, self.udp_sock.recvfrom, 1024)
                 msg = data.decode()
                 if msg == "USER_ANNOUNCE":
-                    server_uri = f"ws://{self.host}:{self.port}"  # reply with the exact bound host:port
+                    # reply with the exact bound host:port
+                    server_uri = f"ws://{self.host}:{self.port}"
                     self.udp_sock.sendto(server_uri.encode(), addr)
         except asyncio.CancelledError:
             raise
@@ -700,7 +901,7 @@ class Server:
             if self.udp_sock:
                 self.udp_sock.close()
                 print(f"[{self.server_uuid}] UDP discovery server closed")
-    
+
     async def heartbeat_loop(self, delay=15):
         try:
             while not self._shutdown_event.is_set():
@@ -713,14 +914,16 @@ class Server:
                         # Ping the websocket to check if it's alive
                         pong_waiter = await ws.ping()
                         await asyncio.wait_for(pong_waiter, timeout=5)
-                        
+
                         link.last_heartbeat = time.time()
-                        
+
                         # Log live status
-                        print(f"[{self.server_uuid}] Server {server_uuid} is alive (last heartbeat {now - link.last_heartbeat:.2f}s ago)")
+                        print(
+                            f"[{self.server_uuid}] Server {server_uuid} is alive (last heartbeat {now - link.last_heartbeat:.2f}s ago)")
 
                     except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
-                        print(f"[{self.server_uuid}] Server {server_uuid} failed heartbeat, closing connection")
+                        print(
+                            f"[{self.server_uuid}] Server {server_uuid} failed heartbeat, closing connection")
                         to_remove.append(server_uuid)
                         await ws.close()
 
@@ -730,7 +933,8 @@ class Server:
                     if link:
                         self.servers_websockets.pop(link.websocket, None)
                         self.server_addrs.pop(server_uuid, None)
-                        print(f"[{self.server_uuid}] Cleaned up server {server_uuid}")
+                        print(
+                            f"[{self.server_uuid}] Cleaned up server {server_uuid}")
 
                 await asyncio.sleep(delay)
 
@@ -749,10 +953,6 @@ class Server:
         except asyncio.CancelledError:
             raise
 
-    
-    
-    
-    
     async def shutdown(self):
         print(f"[{self.server_uuid}] Shutting down server...")
         self._shutdown_event.set()
@@ -786,8 +986,7 @@ class Server:
         self.tasks.append(debug_loop)
         heartbeat_loop = asyncio.create_task(self.heartbeat_loop())
         self.tasks.append(heartbeat_loop)
-        
-        
+
         # Wait for shutdown event instead of hanging forever
         await self._shutdown_event.wait()
 
@@ -813,7 +1012,8 @@ class Server:
 
     async def _handle_server_welcome(self, frame, ws, entry):
         server_uuid = frame["from"]
-        self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
+        self.server_addrs[server_uuid] = (
+            entry["host"], entry["port"], entry["public_key"])
         self.servers[server_uuid] = Link(ws)
         self.servers_websockets[ws] = server_uuid
         self.selected_bootstrap_server = entry
@@ -829,7 +1029,8 @@ class Server:
             return
         peer_ws = await websockets.connect(peer_uri)
         self.servers[server_uuid] = Link(peer_ws)
-        task = asyncio.create_task(self.outgoing_connection_handler(peer_ws, peer_uri))
+        task = asyncio.create_task(
+            self.outgoing_connection_handler(peer_ws, peer_uri))
         self.tasks.append(task)
         self.server_addrs[server_uuid] = (host, port, pubkey)
         self.servers_websockets[peer_ws] = server_uuid
@@ -853,7 +1054,8 @@ class Server:
             "ts": int(time.time() * 1000),
             "payload": {"host": self.host, "port": self.port, "pubkey": self.public_key_base64url},
             "sig": codec.generate_payload_signature(
-                {"payload": {"host": self.host, "port": self.port, "pubkey": self.public_key_base64url}},
+                {"payload": {"host": self.host, "port": self.port,
+                             "pubkey": self.public_key_base64url}},
                 self.private_key,
             ),
         }
