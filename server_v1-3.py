@@ -105,6 +105,7 @@ class Server:
     async def cleanup_client(self, username):
         self.local_users.pop(username, None)
         self.server_addrs.pop(username, None)
+        await self.db.remove_user(user_id=username)
         print(f"[-] Removed client: {username}")
 
         # Notify peers USER_REMOVE to other servers
@@ -253,6 +254,7 @@ class Server:
                         self.local_users.pop(user_id, None)
                         self.user_locations.pop(user_id, None)
                         self.server_addrs.pop(user_id, None)
+                        await self.db.remove_user(user_id)
                         print(f"[-] Removed client: {user_id}")
                         
                         # 3) Forward message to other servers (gossip)
@@ -346,7 +348,10 @@ class Server:
                 # --- User ↔ Server TODOs ---
                 # TODO: Handle USER_HELLO (register local user, broadcast USER_ADVERTISE)
                 if msg_type == "USER_HELLO":
+                    
+                    # TODO: Need to check if uuid is valid & the client should be generating it.
                     client_id = str(uuid.uuid4())
+                    
                     payload = frame.get("payload", {}) or {}
                     pubkey_b64url = payload.get("pubkey")
                     if not pubkey_b64url:
@@ -366,15 +371,7 @@ class Server:
                         meta={"display_name": client_id},
                         version=1,
                     )
-
-                    # ensure membership in 'public'
-                    now_ts = int(time.time())
-                    await self.db.ensure_public_group(now_ts)
-                    await self.db.add_member_to_group("public", client_id, pubkey_b64url, now_ts)
                     
-                    # TODO 
-                    await self._handle_public_member_join(frame)
-
                     # welcome
                     message = deepcopy(self.JSON_base_template)
                     message["type"] = "USER_WELCOME"
@@ -412,9 +409,6 @@ class Server:
 
                     continue
 
-                
-                
-                
                 # --- Direct message routing ---
                 if msg_type == "MSG_DIRECT":
                     recipient = frame.get("to", "")
@@ -688,6 +682,23 @@ class Server:
 
                     continue
                 
+                
+                # --- Public Channel ---
+                if msg_type == "MSG_PUBLIC_CHANNEL":
+                    await self.handle_msg_public_channel(frame, ws)
+                    continue
+                    
+                if msg_type == "PUBLIC_CHANNEL_KEY_SHARE":
+                    await self.handle_public_channel_key_share(frame, ws)
+                    continue
+                
+                if msg_type == "PUBLIC_CHANNEL_ADD":
+                    await self.handle_public_channel_add(frame, ws)
+                    continue
+                
+                if msg_type == "PUBLIC_CHANNEL_UPDATE":
+                    await self.handle_public_channel_update(frame, ws)
+                    continue
      
         except ConnectionClosedOK:
             print(f"[{self.server_uuid}] Graceful close from {uri}")
@@ -707,15 +718,6 @@ class Server:
                     self.user_locations.pop(client_id, None)
 
             print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
-
-    async def _handle_public_member_join(self, frame):
-        # TODO PUBLIC_CHANNEL_ADD
-
-        # TODO PUBLIC_CHANNEL_UPDATED
-        
-        
-        
-        return
 
     async def handle_server_hello_join(self, frame, ws):
         assigned_id = frame["from"]
@@ -754,6 +756,54 @@ class Server:
         except Exception as e:
             print(f"[{self.server_uuid}] Failed to process SERVER_ANNOUNCE: {e}")
     
+    
+    async def handle_msg_public_channel(self, frame, ws):
+        sender = frame.get("from", "")
+        ts = frame.get("ts")
+        payload = frame.get("payload", {})
+    
+        # Duplicate message check - prevent loops
+        msg_id = f"{sender}:{ts}:public"
+        if msg_id in self.seen_messages:
+            print(f"[{self.server_uuid}] Duplicate MSG_PUBLIC_CHANNEL from {sender}, ignoring")
+            return
+        self.seen_messages.add(msg_id)
+        
+        # Limit set size
+        if len(self.seen_messages) > 10000:
+            self.seen_messages = set(list(self.seen_messages)[-5000:])
+        
+        
+        print(f"[{self.server_uuid}] Received MSG_PUBLIC_CHANNEL from {sender}")
+        # Fan out to all local users
+        for user_id, link in list(self.local_users.items()):
+            try:
+                await link.websocket.send(json.dumps(frame))  # forward as-is
+            except Exception:
+                await self.cleanup_client(user_id)
+        
+        # Forward to all other servers
+        for server_id, link in self.servers.items():
+            try:
+                await link.websocket.send(json.dumps(frame))  # forward as-is
+            except Exception as e:
+                print(f"[{self.server_uuid}] Failed to forward MSG_PUBLIC_CHANNEL to {server_id}: {e}")
+        
+        return
+    
+    async def handle_public_channel_key_share(self, frame, ws):
+        print(f"[{self.server_uuid}] [UNSUPPORTED] Received PUBLIC_CHANNEL_KEY_SHARE from {ws}")
+        return
+    
+    async def handle_public_channel_add(self, frame, ws):
+        print(f"[{self.server_uuid}] [UNSUPPORTED] Received PUBLIC_CHANNEL_ADD from {ws}")
+        return
+        
+    async def handle_public_channel_update(self, frame, ws):
+        print(f"[{self.server_uuid}] [UNSUPPORTED] Received PUBLIC_CHANNEL_UPDATE from {ws}")
+        return
+    
+
     async def udp_discovery_server(self):
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -816,7 +866,8 @@ class Server:
             while not self._shutdown_event.is_set():
                 print(f"[{self.server_uuid}] --- Server state ---")
                 print("Servers:", list(self.servers.keys()) or "(none)")
-                print("Users:", list(self.local_users.keys()) or "(none)")
+                print("Users (Local):", list(self.local_users.keys()) or "(none)")
+                print("Users (Remote):", list(self.user_locations.keys()) or "(none)")
                 print("-" * 60)
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -887,9 +938,9 @@ class Server:
         # create the hello join message and wait for response
         await ws.send(json.dumps(self._build_hello_join(entry)))
         frame = await self.wait_for_message(uri, expected_type="SERVER_WELCOME")
-        
-        
         await self._handle_server_welcome(frame, ws, entry)
+        
+        # TODO need to get updated state of public group memebers
 
     async def _handle_server_welcome(self, frame, ws, entry):
         # save server welcome

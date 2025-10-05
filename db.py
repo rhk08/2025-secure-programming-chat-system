@@ -109,6 +109,27 @@ class ChatDB:
             cur = await db.execute("SELECT user_id FROM users")
             rows = await cur.fetchall()
             return [r[0] for r in rows]
+        
+    async def remove_user(self, user_id: str):
+        """
+        Remove a user and all their group memberships.
+        Does not affect group records themselves.
+        """
+        async with aiosqlite.connect(self.path) as db:
+            # Remove user from any groups first
+            await db.execute(
+                "DELETE FROM group_members WHERE member_id=?",
+                (user_id,),
+            )
+
+            # Remove the user record
+            await db.execute(
+                "DELETE FROM users WHERE user_id=?",
+                (user_id,),
+            )
+
+            await db.commit()
+
 
     # ---------------- GROUPS (PUBLIC) ----------------
 
@@ -196,6 +217,19 @@ class ChatDB:
                 (group_id, member_id, role, wrapped_key_b64, now_ts),
             )
             await db.commit()
+            
+    async def get_group_version(self, group_id: str) -> int:
+        """
+        Returns the current version of a group.
+        Returns 0 if the group does not exist.
+        """
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT version FROM groups WHERE group_id=?",
+                (group_id,)
+            )
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
     # ---------------- INTERNAL ----------------
 

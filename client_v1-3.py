@@ -258,12 +258,19 @@ class Client:
                     else:
                         print("[! DEBUG] Message received but signature verification failed")
                     continue
-
-                # Heartbeat
-                if msg.get("type") == "heartbeat":
-                    await self.websocket.send(json.dumps({"type": "heartbeat_ack", "sender": self.client_id}))
+                
+                if msg.get("type") == "MSG_PUBLIC_CHANNEL":
+                    payload = msg.get("payload", {})
+                    sender = msg.get("from")
+                    message = payload.get("ciphertext", "")  # it's plaintext
+                    
+                    # Display sender as friendly name if they're in friends list
+                    sender_display = self.friends_by_id.get(sender, sender)
+                    
+                    print(f"\n[PUBLIC] {sender_display}: {message}")
+                    print(f"[{self.client_id}] Enter command ('help' for commands):", end="", flush=True)
                     continue
-
+                
                 # --- FILE RX ---
                 if msg.get("type") == "FILE_START":
                     p = msg.get("payload") or {}
@@ -440,7 +447,8 @@ class Client:
                     for friend_id, friend_name in self.friends_by_id.items():
                         print(f"{friend_name} | {friend_id:<40}")
                 continue
-
+            
+            # ----- Chat ---
             elif cmd == "chat":
                 if len(cmd_parts) < 3:
                     print("[!] Usage: chat <recipient> <message>")
@@ -490,13 +498,41 @@ class Client:
                 msg_direct["payload"] = {
                     "ciphertext": encrypted_payload,
                     "sender_pub": self.public_key_base64url,
-                    "content_sig": signature_b64url,
+                    "content_sig": "...",
                 }
 
                 self.store_message(msg_direct, message)
                 await self.websocket.send(json.dumps(msg_direct))
                 print("[i] Message sent successfully!")
                 continue
+            
+            # ----- All ----
+            elif cmd == "all":
+                if len(cmd_parts) < 2:
+                    print("[!] Usage: all <message>")
+                    continue
+                
+                message = cmd_parts[1]
+                
+
+                encrypted_payload = message
+                timestamp = int(time.time() * 1000)
+                
+                msg_public = deepcopy(self.JSON_base_template)
+                msg_public["type"] = "MSG_PUBLIC_CHANNEL"
+                msg_public["from"] = self.client_id
+                msg_public["to"] = "public"
+                msg_public["ts"] = timestamp
+                msg_public["payload"] = {
+                    "ciphertext": encrypted_payload,
+                    "sender_pub": self.public_key_base64url,
+                    "content_sig": "..."
+                }
+                
+                await self.websocket.send(json.dumps(msg_public))
+                print("[i] Public message sent!")
+                continue
+            
 
             elif cmd == "list":
                 list_request = deepcopy(self.JSON_base_template)
