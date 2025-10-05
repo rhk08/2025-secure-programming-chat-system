@@ -101,8 +101,8 @@ class Server:
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port} ({'INTRODUCER' if self.introducer_mode else 'NORMAL'})")
 
     async def cleanup_client(self, username):
-        self.connected_clients.pop(username, None)
-        self.client_public_keys.pop(username, None)
+        self.local_users.pop(username, None)
+        self.server_addrs.pop(username, None)
         print(f"[-] Removed client: {username}")
 
         # Notify peers USER_REMOVE to other servers
@@ -245,9 +245,9 @@ class Server:
                         user_location = payload.get("server_id")
                         user_id = payload.get("user_id")
 
-                        self.connected_clients.pop(user_id, None)
+                        self.local_users.pop(user_id, None)
                         self.user_locations.pop(user_id, None)
-                        self.client_public_keys.pop(user_id, None)
+                        self.server_addrs.pop(user_id, None)
                         print(f"[-] Removed client: {user_id}")
                         
                         # 3) Forward message to other servers (gossip)
@@ -535,13 +535,14 @@ class Server:
                     target = payload.get("recipient_uuid")
                     requester = frame.get("from")
 
-                    pub_key = self.client_public_keys.get(target)
+                    # Look up the user's public key from the database
+                    pub_key = await self.db.get_user_pubkey(target)
 
                     if pub_key:
                         # We have the key locally - send it back
                         message_json = deepcopy(self.JSON_base_template)
                         message_json['type'] = "PUB_KEY"
-                        message_json['from'] = self.server_uuid
+                        message_json['from'] = self.server_uuid 
                         message_json['to'] = requester
                         message_json['ts'] = time.time()
                         message_json['payload'] = {
