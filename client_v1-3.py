@@ -234,8 +234,8 @@ class Client:
                     #verify server signature for transport layer security
                     sig = msg.get("sig")
                     if not sig or not hasattr(self, 'server_pub_key'):
-                        print("[!] [DEBUG] no server signature or server pub key not recorded")
-                        return False
+                        print("[!] [DEBUG] Recieved USER_DELIVER, no server signature or server pub key was recorded message will no")
+                        continue
                     
                     try:
                         server_pubkey_obj = codec.decode_public_key_base64url(self.server_pub_key)
@@ -243,7 +243,7 @@ class Client:
 
                     except Exception as e:
                         print(f"[!] [DEBUG] Server signature verification failed: {e}")
-                        return False
+                        continue
         
                     #verify content signature
                     if await self.verify_message(msg):
