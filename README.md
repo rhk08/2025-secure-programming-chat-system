@@ -8,6 +8,8 @@ Note this is the version of our chat system WITH vulnerabilities.
     git clone <repository_url>
     cd 2025-secure-programming-chat-system
 
+### OR unzip the repository from a .zip file
+
 ## 2. Create a virtual environment
     # On Windows
     python -m venv venv
