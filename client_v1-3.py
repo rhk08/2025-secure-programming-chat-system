@@ -125,7 +125,6 @@ class Client:
         print("  chat <recipient> <message>   - send a message to a user")
         print("  sendfile <recipient> <path>  - send a file to a user (DM)")
         print("  all <message>                - send a group message to all current users")
-        print("  history [user]               - show your message history with a user")
         print("  add <uuid> <nickname>        - add a user as a friend")
         print("  friends                      - show a list of your friends")
         print("  whoami                       - show your current UUID")
