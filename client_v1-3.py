@@ -37,7 +37,7 @@ class Client:
         self.server_pub_key = None
 
         # Generate keys
-        self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
         self.public_key = self.private_key.public_key()
 
         # Export public key in base64url(PEM)
@@ -117,8 +117,23 @@ class Client:
             hashes.SHA256(),
         )
         return base64.urlsafe_b64encode(signature).decode("utf-8")
+    
+    # List available commands
+    def list_commands(self):
+        print("\033[1m[i] Available commands:\033[0m")
+        print("  chat <recipient> <message>   - send a message to a user")
+        print("  sendfile <recipient> <path>  - send a file to a user (DM)")
+        print("  all <message>                - send a group message to all current users")
+        print("  history [user]               - show your message history with a user")
+        print("  add <uuid> <nickname>        - add a user as a friend")
+        print("  friends                      - show a list of your friends")
+        print("  whoami                       - show your current UUID")
+        print("  list                         - show all current users")
+        print("  quit | q                     - exit")
+        print("  help | -h                    - show this help")
 
     async def verify_message(self, msg_direct):
+        # verifying signature for user -> user messages (more strict than standard signature in codec)
         try:
             payload = msg_direct.get("payload", {})
             ciphertext = payload.get("ciphertext")
@@ -128,7 +143,7 @@ class Client:
             recipient = msg_direct.get("to")
             ts = float(msg_direct.get("ts"))
             if not (ciphertext and signature_b64url and sender_pubkey_b64url):
-                print("[! DEBUG] missing ciphertext, signature, or sender_pub")
+                print("[!] [DEBUG] missing ciphertext, signature, or sender_pub")
                 return False
 
             pem_bytes = base64.urlsafe_b64decode(sender_pubkey_b64url)
@@ -146,10 +161,10 @@ class Client:
             )
             return True
         except InvalidSignature:
-            print("[! DEBUG] Signature INVALID!")
+            print("[!] [DEBUG] Signature INVALID!")
             return False
         except Exception as e:
-            print(f"[! DEBUG] Verification error: {e}")
+            print(f"[!] [DEBUG] Verification error: {e}")
             return False
 
     # ---------------- Sign-in ----------------
@@ -173,17 +188,7 @@ class Client:
                 self.client_id = response.get("to")
                 payload = response.get("payload")
                 self.server_pub_key = payload.get("server_pub_key") 
-
-                print("[i] Available commands:")
-                print("  chat <recipient> <message>   - send a message to a user")
-                print("  sendfile <recipient> <path>  - send a file to a user (DM)")
-                print("  all <message>                - send a group message")
-                print("  add <uuid> <nickname>        - add a user as a friend")
-                print("  friends                      - shows a list of your friends")
-                print("  whoami                       - show your current UUID")
-                print("  list                         - shows all current users")
-                print("  quit | q                     - exit")
-                print("  help | -h                    - show this help")
+                self.list_commands()
             else:
                 print("Error, please retry connection")
 
@@ -222,13 +227,14 @@ class Client:
                     await self._incoming_responses.put(msg)
                     continue
 
+
                 # Chat messages
                 if msg.get("type") == "USER_DELIVER":
        
                     #verify server signature for transport layer security
                     sig = msg.get("sig")
                     if not sig or not hasattr(self, 'server_pub_key'):
-                        print("[DEBUG] no server signature or server pub key not recorded")
+                        print("[!] [DEBUG] no server signature or server pub key not recorded")
                         return False
                     
                     try:
@@ -236,7 +242,7 @@ class Client:
                         codec.verify_payload_signature(msg, server_pubkey_obj)
 
                     except Exception as e:
-                        print(f"[DEBUG] Server signature verification failed: {e}")
+                        print(f"[!] [DEBUG] Server signature verification failed: {e}")
                         return False
         
                     #verify content signature
@@ -247,16 +253,16 @@ class Client:
                             plaintext = await self.decrypt_message(ciphertext)
                             self.store_message(msg, plaintext)
 
-                            # print(f"\n[!] Message from {payload.get('sender')}:")
                             if self.friends_by_id.get(payload.get('sender')) == None:
-                                print(f"\n[!] Message received from {payload.get('sender')}:")
+                                print(f"\n[i] Message received from {payload.get('sender')}:")
                             else:
-                                print(f"\n[!] Message received from {self.friends_by_id.get(payload.get('sender'))}:")
+                                print(f"\n[i] Message received from {self.friends_by_id.get(payload.get('sender'))}:")
 
                             print(plaintext)
-                            print(f"[{self.client_id}] ", end="", flush=True)
+                            print("-------------------------------------------------------------")
+                            print(f"\033[1mEnter command ('help' for commands):\033[0m", end="", flush=True)
                     else:
-                        print("[! DEBUG] Message received but signature verification failed")
+                        print("[!] [DEBUG] Message received but signature verification failed")
                     continue
                 
                 if msg.get("type") == "MSG_PUBLIC_CHANNEL":
@@ -267,8 +273,9 @@ class Client:
                     # Display sender as friendly name if they're in friends list
                     sender_display = self.friends_by_id.get(sender, sender)
                     
-                    print(f"\n[PUBLIC] {sender_display}: {message}")
-                    print(f"[{self.client_id}] Enter command ('help' for commands):", end="", flush=True)
+                    print(f"\n[i] Public message recieved from {sender_display}:\n{message}")
+                    print("-------------------------------------------------------------")
+                    print(f"\033[1mEnter command ('help' for commands):\033[0m", end="", flush=True)
                     continue
                 
                 # --- FILE RX ---
@@ -328,6 +335,19 @@ class Client:
                     if not ok_sha:
                         print(f"[!] SHA-256 mismatch: got {sha_hex}, expected {entry['sha256']}")
                     del self.file_rx[fid]
+                    print("-------------------------------------------------------------")
+                    print(f"\033[1mEnter command ('help' for commands):\033[0m", end="", flush=True)
+
+                    continue
+
+                if msg.get("type") == "ERROR":
+                    payload = msg.get("payload")
+                    sender = msg.get("from")
+                    error_code = payload.get("code")
+                    print(f"Error {error_code} received from {sender}")
+                    print("-------------------------------------------------------------")
+                    print(f"\033[1mEnter command ('help' for commands):\033[0m", end="", flush=True)
+
                     continue
 
         except websockets.exceptions.ConnectionClosed:
@@ -335,16 +355,16 @@ class Client:
 
     def add_friend(self, friend_id, friend_name):
         if len(friend_name) > 12:
-            print("Name too long!")
+            print("[!] Name too long!")
             return
 
         if friend_name == "Group":
-            print("Name cannot be 'Group'!")
+            print("[!] Name cannot be 'Group'")
             return
 
         # If the name is already taken by another UUID
         if friend_name in self.friends_by_name and self.friends_by_name[friend_name] != friend_id:
-            print(f"Name {friend_name} is already taken by another user!")
+            print(f"[!] Name {friend_name} is already taken by another user!")
             return
 
         # If the UUID already exists, update its name
@@ -354,10 +374,10 @@ class Client:
                 # remove old name entry
                 if old_name in self.friends_by_name:
                     del self.friends_by_name[old_name]
-                print(f"Updated friend {friend_id}: {old_name} to {friend_name}")
+                print(f"[i] Updated {friend_id}'s nickname from {old_name} to {friend_name}!")
 
         else:
-            print(f"Friend added: {friend_name} ({friend_id})")
+            print(f"[i] Friend added: {friend_name} ({friend_id})")
 
         # Add/update both dicts
         self.friends_by_id[friend_id] = friend_name
@@ -367,7 +387,7 @@ class Client:
     async def send_messages(self):
         loop = asyncio.get_event_loop()
         while True:
-            user_input = await loop.run_in_executor(None, input, f"[{self.client_id}] Enter command ('help' for commands): ")
+            user_input = await loop.run_in_executor(None, input, "-------------------------------------------------------------\n\033[1mEnter command ('help' for commands):\033[0m ")
             if not user_input.strip():
                 continue
 
@@ -379,17 +399,7 @@ class Client:
             cmd = cmd_parts[0].lower()
 
             if cmd in ("help", "-h"):
-                print("[i] Available commands:")
-                print("  chat <recipient> <message>   - send a message to a user")
-                print("  sendfile <recipient> <path>  - send a file to a user (DM)")
-                print("  all <message>                - send a group message")
-                print("  add <uuid> <nickname>        - add a user as a friend")
-                print("  friends                      - shows a list of your friends")
-                print("  whoami                       - show your current UUID")
-                print("  list                         - shows all current users")
-                print("  quit | q                     - exit")
-                print("  help | -h                    - show this help")
-
+                self.list_commands()
                 continue
 
             elif cmd == "whoami":
@@ -471,17 +481,23 @@ class Client:
                 pubkey_request["to"] = "Server"
                 pubkey_request["ts"] = time.time()
                 pubkey_request["payload"] = {"recipient_uuid": recipient}
+                # signature for user -> server
+                pubkey_request["sig"] = codec.generate_payload_signature(
+                    pubkey_request,
+                    self.private_key
+                )
                 await self.websocket.send(json.dumps(pubkey_request))
-
+                
                 recipient_pubkey_b64url = None
-                while True:
-                    msg = await self._incoming_responses.get()
-                    payload = msg.get("payload", {})
-                    if msg.get("type") == "PUB_KEY" and payload.get("recipient_uuid") == recipient:
-                        recipient_pubkey_b64url = payload.get("recipient_pub")
-                        break
-                if not recipient_pubkey_b64url:
-                    print(f"[!] Cannot obtain public key for {friend_receiving}")
+                try:
+                    while True:
+                        msg = await asyncio.wait_for(self._incoming_responses.get(), timeout=1.0)
+                        payload = msg.get("payload", {})
+                        if msg.get("type") == "PUB_KEY" and payload.get("recipient_uuid") == recipient:
+                            recipient_pubkey_b64url = payload.get("recipient_pub")
+                            break
+                except asyncio.TimeoutError:
+                    print(f"[!] No PUB_KEY response from server for {recipient}, skipping message.")
                     continue
 
                 encrypted_payload = await self.encrypt_message(message, recipient_pubkey_b64url)
@@ -498,8 +514,13 @@ class Client:
                 msg_direct["payload"] = {
                     "ciphertext": encrypted_payload,
                     "sender_pub": self.public_key_base64url,
-                    "content_sig": "...",
+                    "content_sig": signature_b64url 
                 }
+                # signature for user -> server
+                msg_direct["sig"] = codec.generate_payload_signature(
+                    msg_direct,
+                    self.private_key
+                )
 
                 self.store_message(msg_direct, message)
                 await self.websocket.send(json.dumps(msg_direct))
@@ -513,7 +534,6 @@ class Client:
                     continue
                 
                 message = cmd_parts[1]
-                
 
                 encrypted_payload = message
                 timestamp = int(time.time() * 1000)
@@ -530,16 +550,20 @@ class Client:
                 }
                 
                 await self.websocket.send(json.dumps(msg_public))
-                print("[i] Public message sent!")
+                print("[i] Public message sent successfully!")
                 continue
             
-
+            # --- list ---
             elif cmd == "list":
                 list_request = deepcopy(self.JSON_base_template)
                 list_request["type"] = "LIST_REQUEST"
                 list_request["from"] = self.client_id
                 list_request["to"] = self.server_uri
                 list_request["ts"] = int(time.time() * 1000)
+                list_request["sig"] = codec.generate_payload_signature(
+                    list_request,
+                    self.private_key
+                )
                 await self.websocket.send(json.dumps(list_request))
 
                 users_list = None
@@ -603,17 +627,22 @@ class Client:
         pubkey_request["to"] = "Server"
         pubkey_request["ts"] = time.time()
         pubkey_request["payload"] = {"recipient_uuid": recipient}
+        pubkey_request["sig"] = codec.generate_payload_signature(
+            pubkey_request,
+            self.private_key
+        )
         await self.websocket.send(json.dumps(pubkey_request))
 
         recipient_pubkey_b64url = None
-        while True:
-            msg = await self._incoming_responses.get()
-            payload = msg.get("payload", {})
-            if msg.get("type") == "PUB_KEY" and payload.get("recipient_uuid") == recipient:
-                recipient_pubkey_b64url = payload.get("recipient_pub")
-                break
-        if not recipient_pubkey_b64url:
-            print(f"[!] Cannot obtain public key for {recipient}")
+        try:
+            while True:
+                msg = await asyncio.wait_for(self._incoming_responses.get(), timeout=1.0)
+                payload = msg.get("payload", {})
+                if msg.get("type") == "PUB_KEY" and payload.get("recipient_uuid") == recipient:
+                    recipient_pubkey_b64url = payload.get("recipient_pub")
+                    break
+        except asyncio.TimeoutError:
+            print(f"[!] No PUB_KEY response from server for {recipient}, cannot send file.")
             return
 
         # 2) Open file and compute meta
@@ -642,6 +671,13 @@ class Client:
             "sha256": sha_hex,
             "mode": "dm",
         }
+        
+        # signature for user -> server
+        start["sig"] = codec.generate_payload_signature(
+            start,
+            self.private_key
+        )
+
         await self.websocket.send(json.dumps(start))
 
         # 4) FILE_CHUNK(s)
@@ -662,6 +698,11 @@ class Client:
                     "index": index,
                     "ciphertext": enc_b64,
                 }
+                # signature for user -> server
+                chunk["sig"] = codec.generate_payload_signature(
+                    chunk,
+                    self.private_key
+                )
                 await self.websocket.send(json.dumps(chunk))
                 index += 1
 
@@ -672,9 +713,14 @@ class Client:
         end["to"] = recipient
         end["ts"] = int(time.time() * 1000)
         end["payload"] = {"file_id": file_id}
+        # signature for user -> server
+        end["sig"] = codec.generate_payload_signature(
+            end,
+            self.private_key
+        )
         await self.websocket.send(json.dumps(end))
 
-        print(f"[i] Sent file '{name}' ({size} bytes) to {recipient}.")
+        print(f"[i] Sent file '{name}' ({size} bytes) to {recipient}!")
 
     # ---------------- Start ----------------
     async def start(self):

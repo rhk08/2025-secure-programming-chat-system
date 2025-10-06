@@ -166,7 +166,68 @@ class Server:
                 self.server_addrs.pop(server_uuid, None)
                 print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
     
+    async def construct_error_message(self, code, recipient, detail):
+        # codes: USER_NOT_FOUND, INVALID_SIG, BAD_KEY, TIMEOUT, UNKNOWN_TYPE, NAME_IN_USE
 
+        error_msg = deepcopy(self.JSON_base_template)
+        error_msg['type'] = "ERROR"
+        error_msg['from'] = self.server_uuid 
+        error_msg['to'] = recipient
+        error_msg['ts'] = time.time()
+        error_msg['payload'] = {
+            "code": code,
+            "detail": detail
+        }
+        error_msg["sig"] = codec.generate_payload_signature(
+            error_msg,
+            self.private_key
+        )
+        return error_msg
+    
+    async def verify_sender_signature(self, frame, ws):
+        # verify signature from sender handling both user and server
+        sender = frame.get("from")
+        type = frame.get("type")
+        
+        # get sender's pubkey
+        if sender in self.local_users:
+            pubkey = await self.db.get_user_pubkey(sender)
+        elif sender in self.server_addrs:
+            _, _, pubkey = self.server_addrs[sender]
+        else:
+            print(f"[{self.server_uuid}] {type} from unknown sender {sender}")
+            error_msg = await self.construct_error_message(
+                "UNKNOWN_TYPE", 
+                sender, 
+                "{type} from unknown sender {sender}"
+            )
+            await ws.send(json.dumps(error_msg))
+            return False
+
+        if not pubkey:
+            print(f"[{self.server_uuid}] No pubkey for sender {sender}")
+            error_msg = await self.construct_error_message(
+                "UNKNOWN_TYPE",
+                sender,
+                "No pubkey for sender {sender}"
+            )
+            await ws.send(json.dumps(error_msg))
+            return False
+
+        try:
+            pubkey_obj = codec.decode_public_key_base64url(pubkey)
+            codec.verify_payload_signature(frame, pubkey_obj)
+            return True
+        except Exception as e:
+            print(f"[{self.server_uuid}] Signature verification failed for {sender}: {e}")
+            error_msg = await self.construct_error_message(
+                "INVALID_SIG",
+                sender,
+                "Signature verification failed for {sender}: {str(e)}"
+            )
+            await ws.send(json.dumps(error_msg))
+            return False
+        
     # Updated incoming_connection_handler for incoming connections (servers connecting to us)
     async def incoming_connection_handler(self, ws):
         """Handle incoming websocket connections (servers connecting to this server)."""
@@ -210,10 +271,13 @@ class Server:
                     # 1) Verify server signature 
                     _, _, pubkey = self.server_addrs[user_location] 
 
-                    pubkey_obj = codec.decode_public_key_base64url(pubkey)
-                    codec.verify_payload_signature(frame, pubkey_obj)
-
-                    #TODO: error handling for if verification fails
+                    try:
+                        pubkey_obj = codec.decode_public_key_base64url(pubkey)
+                        codec.verify_payload_signature(frame, pubkey_obj)
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Signature verification failed for {user_location}: {e}")
+                        error_msg = await self.construct_error_message("INVALID_SIG", user_location, "Signature verification failed for {user_location}: {e}")
+                        continue
 
                     # only add to user locations and forward user advertise if we havent seen this user before
                     if user_id not in self.user_locations:
@@ -241,10 +305,13 @@ class Server:
                         # 1) Verify server signature 
                         _, _, pubkey = self.server_addrs[user_location] 
 
-                        pubkey_obj = codec.decode_public_key_base64url(pubkey)
-                        codec.verify_payload_signature(frame, pubkey_obj)
-
-                        #TODO: error handling for if verification fails
+                        try:
+                            pubkey_obj = codec.decode_public_key_base64url(pubkey)
+                            codec.verify_payload_signature(frame, pubkey_obj)
+                        except Exception as e:
+                            print(f"[{self.server_uuid}] Signature verification failed for {user_location}: {e}")
+                            error_msg = await self.construct_error_message("INVALID_SIG", user_location, "Signature verification failed for {user_location}: {e}")
+                            continue
 
                         # 2) remove
                         payload = frame.get("payload")
@@ -306,8 +373,13 @@ class Server:
                             # 1) verify signature
                             _, _, pubkey = self.server_addrs[forwarding_server] 
 
-                            pubkey_obj = codec.decode_public_key_base64url(pubkey)
-                            codec.verify_payload_signature(frame, pubkey_obj)
+                            try:
+                                pubkey_obj = codec.decode_public_key_base64url(pubkey)
+                                codec.verify_payload_signature(frame, pubkey_obj)
+                            except Exception as e:
+                                print(f"[{self.server_uuid}] Signature verification failed for {forwarding_server}: {e}")
+                                error_msg = await self.construct_error_message("INVALID_SIG", forwarding_server, "Signature verification failed for {forwarding_server}: {e}")
+                                continue
 
                             # Convert SERVER_DELIVER to USER_DELIVER for local client
                             user_deliver_msg = deepcopy(self.JSON_base_template)
@@ -355,7 +427,10 @@ class Server:
                     payload = frame.get("payload", {}) or {}
                     pubkey_b64url = payload.get("pubkey")
                     if not pubkey_b64url:
-                        await ws.send(json.dumps({"type": "ERROR", "code": "BAD_KEY", "reason": "missing pubkey"}))
+                        print("Missing pubkey")
+                        error_msg = await self.construct_error_message("BAD_KEY", user_location, "Missing pubkey")
+                        await ws.send(json.dumps(error_msg))
+                        #await ws.send(json.dumps({"type": "ERROR", "code": "BAD_KEY", "reason": "missing pubkey"}))
                         continue
 
                     # local presence
@@ -415,7 +490,21 @@ class Server:
                     sender = frame.get("from", "")
 
                     if recipient not in self.user_locations:
-                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        print(f"{recipient} not connected")
+                        error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                        await ws.send(json.dumps(error_msg))
+                        #await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        continue
+                    
+                    # 1) verify signature
+                    pubkey = await self.db.get_user_pubkey(sender)
+
+                    try:
+                        pubkey_obj = codec.decode_public_key_base64url(pubkey)
+                        codec.verify_payload_signature(frame, pubkey_obj)
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Signature verification failed for {sender}: {e}")
+                        error_msg = await self.construct_error_message("INVALID_SIG", sender, "Signature verification failed for {sender}: {e}")
                         continue
 
                     if self.user_locations[recipient] == "local":
@@ -429,11 +518,14 @@ class Server:
                             payload = frame.get("payload", {}) or {}
                             payload["sender"] = sender
                             message["payload"] = payload
+                            message["sig"] = codec.generate_payload_signature(
+                                message,
+                                self.private_key
+                            )
                             await self.local_users[recipient].websocket.send(json.dumps(message))
                             print(f"DEBUG: MSG_DIRECT delivered to {recipient} from {sender}")
                         except Exception:
                             await self.cleanup_client(recipient)
-                            
                             
                     else:
                         try:
@@ -467,9 +559,14 @@ class Server:
                                 print(f'[{self.server_uuid}] Forwarded message from {sender} to {server_location} for user {recipient}')
                             else:
                                 print(f"[{self.server_uuid}] Server {server_location} not connected")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", self.server_uuid, "[{self.server_uuid}] Server {server_location} not connected")
+                                await ws.send(json.dumps(error_msg))
+                                
                                 
                         except Exception as e:
                             print(f"[{self.server_uuid}] Error forwarding message to {server_location}: {e}")
+                            error_msg = await self.construct_error_message("UNKNOWN_TYPE", self.server_uuid, "[{self.server_uuid}] Error forwarding message to {server_location}: {e}")
+                            await ws.send(json.dumps(error_msg))
                             
                     continue
 
@@ -480,7 +577,11 @@ class Server:
                     recipient = frame.get("to", "")
                     sender = frame.get("from", "")
 
-                    if mode != "dm":
+                    # verify signature
+                    if not await self.verify_sender_signature(frame, ws):
+                        continue
+
+                    if mode != "dm":                      
                         await ws.send(json.dumps({
                             "type": "ERROR",
                             "code": "PUBLIC_NOT_IMPLEMENTED",
@@ -489,7 +590,11 @@ class Server:
                         continue
 
                     if recipient not in self.user_locations:
-                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        print(f"{recipient} not connected")
+                        error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                        await ws.send(json.dumps(error_msg))
+                        
+                        #await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
                         continue
 
                     if self.user_locations[recipient] == "local":
@@ -503,9 +608,17 @@ class Server:
                             target_server_id = self.user_locations[recipient]
                             link = self.servers.get(target_server_id)
                             if not link:
-                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
+                                print(f"{recipient} not connected")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                                await ws.send(json.dumps(error_msg))
+                                #await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                            frame["from"] = self.server_uuid
+                            frame["sig"] = codec.generate_payload_signature(
+                                frame,
+                                self.private_key
+                            )
+                            await link.websocket.send(json.dumps(frame))  # forward unchanged (except for sender and new server -> server sig)
                             print(f"DEBUG: FILE_START forwarded to server {target_server_id} for user {recipient}")
                         except Exception:
                             await self.cleanup_client(recipient)
@@ -513,8 +626,17 @@ class Server:
 
                 if msg_type == "FILE_CHUNK":
                     recipient = frame.get("to", "")
+                    sender = frame.get("from", "")
+
+                    # verify signature
+                    if not await self.verify_sender_signature(frame, ws):
+                        continue
+
                     if recipient not in self.user_locations:
-                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        print(f"{recipient} not connected")
+                        error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                        await ws.send(json.dumps(error_msg))
+                        #await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
                         continue
 
                     if self.user_locations[recipient] == "local":
@@ -527,9 +649,17 @@ class Server:
                             target_server_id = self.user_locations[recipient]
                             link = self.servers.get(target_server_id)
                             if not link:
-                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
+                                print(f"{recipient} not connected")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                                await ws.send(json.dumps(error_msg))
+                                #await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                            frame["from"] = self.server_uuid
+                            frame["sig"] = codec.generate_payload_signature(
+                                frame,
+                                self.private_key
+                            )
+                            await link.websocket.send(json.dumps(frame))  # forward unchanged (except for sender and new server -> server sig)
                         except Exception:
                             await self.cleanup_client(recipient)
                     continue
@@ -538,8 +668,15 @@ class Server:
                     recipient = frame.get("to", "")
                     sender = frame.get("from", "")
 
+                    # verify signature
+                    if not await self.verify_sender_signature(frame, ws):
+                        continue
+
                     if recipient not in self.user_locations:
-                        await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
+                        print(f"{recipient} not connected")
+                        error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                        await ws.send(json.dumps(error_msg))    
+                        #await ws.send(json.dumps({"type": "Error", "content": f"{recipient} not connected"}))
                         continue
 
                     if self.user_locations[recipient] == "local":
@@ -553,9 +690,17 @@ class Server:
                             target_server_id = self.user_locations[recipient]
                             link = self.servers.get(target_server_id)
                             if not link:
-                                await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
+                                print(f"{recipient} not connected")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", sender, "{recipient} not connected")
+                                await ws.send(json.dumps(error_msg))    
+                                #await ws.send(json.dumps({"type": "Error", "content": f"route to {recipient} unknown"}))
                                 continue
-                            await link.websocket.send(json.dumps(frame))  # forward unchanged
+                            frame["from"] = self.server_uuid
+                            frame["sig"] = codec.generate_payload_signature(
+                                frame,
+                                self.private_key
+                            )
+                            await link.websocket.send(json.dumps(frame))  # forward unchanged (except for sender and new server -> server sig)
                             print(f"DEBUG: FILE_END forwarded to server {target_server_id} for user {recipient}")
                         except Exception:
                             await self.cleanup_client(recipient)
@@ -566,6 +711,9 @@ class Server:
                     payload = frame.get("payload") or {}
                     target = payload.get("recipient_uuid")
                     requester = frame.get("from")
+
+                    if not await self.verify_sender_signature(frame, ws):
+                        continue
 
                     # Look up the user's public key from the database
                     pub_key = await self.db.get_user_pubkey(target)
@@ -590,11 +738,8 @@ class Server:
                             server_location = self.user_locations.get(target)
                             if not server_location or server_location == "local":
                                 # User not found or should be local but isn't in client_public_keys
-                                error_msg = deepcopy(self.JSON_base_template)
-                                error_msg["type"] = "ERROR"
-                                error_msg["from"] = self.server_uuid
-                                error_msg["to"] = requester
-                                error_msg["payload"] = {"code": "USER_NOT_FOUND", "message": f"User {target} not found"}
+                                print(f"[!] [DEBUG] user {target} does not exist")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", requester, "[!] [DEBUG] user {target} does not exist")
                                 await ws.send(json.dumps(error_msg))
                                 continue
                                 
@@ -611,6 +756,10 @@ class Server:
                             pubkey_request['payload'] = {
                                 "recipient_uuid": target  # Fixed: was 'recipient' before
                             }
+                            pubkey_request['sig'] = codec.generate_payload_signature(
+                                pubkey_request,
+                                self.private_key
+                            )
                             
                             # Send to the correct server
                             server_uri = f"ws://{self.server_addrs[server_location][0]}:{self.server_addrs[server_location][1]}"
@@ -643,15 +792,13 @@ class Server:
                                 print(f"[{self.server_uuid}] Forwarded public key for {target} to {requester}")
                             else:
                                 print(f"[{self.server_uuid}] Received wrong PUB_KEY response")
+                                error_msg = await self.construct_error_message("BAD_KEY", self.server_uuid, "[{self.server_uuid}] Received wrong PUB_KEY response")
+                                await ws.send(json.dumps(error_msg))
+                                
 
                         except Exception as e:
                             print(f"[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {e}")
-                            # Send error back to requester
-                            error_msg = deepcopy(self.JSON_base_template)
-                            error_msg["type"] = "ERROR"
-                            error_msg["from"] = self.server_uuid
-                            error_msg["to"] = requester
-                            error_msg["payload"] = {"code": "PUBKEY_REQUEST_FAILED", "message": str(e)}
+                            error_msg = await self.construct_error_message("BAD_KEY", self.server_uuid, "[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {e}")
                             await ws.send(json.dumps(error_msg))
 
                     continue
@@ -659,9 +806,20 @@ class Server:
                 # --- List users ---
                 if msg_type == "LIST_REQUEST":
                     requester = frame.get("from")
-
+                    
                     if not requester:
                         print(f"[{self.server_uuid}] LIST_REQUEST missing 'from' field")
+                        continue
+
+                    # verify signature
+                    pubkey = await self.db.get_user_pubkey(requester)
+
+                    try:
+                        pubkey_obj = codec.decode_public_key_base64url(pubkey)
+                        codec.verify_payload_signature(frame, pubkey_obj)
+                    except Exception as e:
+                        print(f"[{self.server_uuid}] Signature verification failed for {requester}: {e}")
+                        error_msg = await self.construct_error_message("INVALID_SIG", requester, "Signature verification failed for {requester}: {e}")
                         continue
 
                     users = []
