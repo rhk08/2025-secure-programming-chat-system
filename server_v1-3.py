@@ -935,6 +935,8 @@ class Server:
         print(f"[{self.server_uuid}] Received MSG_PUBLIC_CHANNEL from {sender}")
         # Fan out to all local users
         for user_id, link in list(self.local_users.items()):
+            if user_id == sender:
+                continue
             try:
                 await link.websocket.send(json.dumps(frame))  # forward as-is
             except Exception:
@@ -1025,7 +1027,14 @@ class Server:
                 print(f"[{self.server_uuid}] --- Server state ---")
                 print("Servers:", list(self.servers.keys()) or "(none)")
                 print("Users (Local):", list(self.local_users.keys()) or "(none)")
-                print("Users (Remote):", list(self.user_locations.keys()) or "(none)")
+                
+                remote_users = [
+                    f"{user_id} (server: {server_id})"
+                    for user_id, server_id in self.user_locations.items()
+                    if server_id not in ("local", self.server_uuid)
+                ]
+
+                print("Users (Remote):", remote_users or "(none)")
                 print("-" * 60)
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:

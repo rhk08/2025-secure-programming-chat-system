@@ -395,7 +395,7 @@ class Client:
                 await self.websocket.close()
                 break
 
-            cmd_parts = user_input.split(maxsplit=2)
+            cmd_parts = user_input.split(maxsplit=-1)
             cmd = cmd_parts[0].lower()
 
             if cmd in ("help", "-h"):
@@ -472,7 +472,9 @@ class Client:
                 else:
                     recipient = cmd_parts[1]
 
-                message = cmd_parts[2]
+                message = " ".join(cmd_parts[2:])
+                
+                print(message)
 
                 # request recipient pubkey
                 pubkey_request = deepcopy(self.JSON_base_template)
@@ -533,7 +535,7 @@ class Client:
                     print("[!] Usage: all <message>")
                     continue
                 
-                message = cmd_parts[1]
+                message = " ".join(cmd_parts[1:])
 
                 encrypted_payload = message
                 timestamp = int(time.time() * 1000)
