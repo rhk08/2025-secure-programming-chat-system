@@ -840,7 +840,6 @@ class Server:
 
                     continue
                 
-                
                 # --- Public Channel ---
                 if msg_type == "MSG_PUBLIC_CHANNEL":
                     await self.handle_msg_public_channel(frame, ws)
