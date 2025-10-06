@@ -32,7 +32,7 @@ class Link:
 
 
 class Server:
-    def __init__(self, host="127.0.0.1", port=9000, introducers=None, introducer_mode=False):
+    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False, localhost_mode=False):
         # --- Server state ---
         self.servers = {}            # server_id -> Link
         self.server_addrs = {}       # server_id -> (host, port, pubkey)
@@ -44,7 +44,13 @@ class Server:
         with open("SOCP.json", 'r') as file:
             self.JSON_base_template = json.load(file)
 
-        self.host = host
+
+        if localhost_mode:
+            self.host = "127.0.0.1"
+        else:
+            self.host = host
+        
+        
         self.port = port
         self.server_uuid = str(uuid.uuid4())
         self.UDP_DISCOVERY_PORT = 9999
@@ -55,7 +61,7 @@ class Server:
         selected = None
         if introducer_mode:
             for entry in BOOTSTRAP_SERVERS:
-                if entry["host"] == host and entry["port"] == port:
+                if entry["host"] == self.host and entry["port"] == port:
                     selected = entry
                     break
             if selected is None:
@@ -98,7 +104,7 @@ class Server:
         self.selected_bootstrap_server = {}
 
         # Per-port DB file (one DB per server)
-        self.db = ChatDB(f"chat_{self.port}.db")
+        self.db = ChatDB(f"databases/chat_{self.port}.db")
 
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port} ({'INTRODUCER' if self.introducer_mode else 'NORMAL'})")
 
@@ -164,7 +170,7 @@ class Server:
             if server_uuid:
                 self.servers.pop(server_uuid, None)
                 self.server_addrs.pop(server_uuid, None)
-                print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri} THIS HAS NOT BEEN TESTED")
+                print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri}")
     
     async def construct_error_message(self, code, recipient, detail):
         # codes: USER_NOT_FOUND, INVALID_SIG, BAD_KEY, TIMEOUT, UNKNOWN_TYPE, NAME_IN_USE
@@ -1170,7 +1176,8 @@ class Server:
 async def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9000
     introducer_mode = "--intro" in sys.argv
-    server = Server(port=port, introducer_mode=introducer_mode)
+    localhost_mode = "--local" in sys.argv
+    server = Server(port=port, introducer_mode=introducer_mode, localhost_mode=localhost_mode)
     try:
         await server.start()
     except KeyboardInterrupt:
