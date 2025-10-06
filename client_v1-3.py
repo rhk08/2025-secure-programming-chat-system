@@ -407,6 +407,9 @@ class Client:
                 continue
 
             elif cmd == "history":
+                print(f"[i] Deprecated Command")
+                continue
+                
                 if len(cmd_parts) == 1:
                     print("[i] Unread messages per user:")
                     for user, count in self.unread_messages.items():
