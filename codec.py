@@ -98,3 +98,12 @@ def decode_public_key_base64url(key_base64url):
         base64.urlsafe_b64decode(key_base64url)
     )
     return decoded_key_object
+
+# ====================
+# Group Members
+# ====================
+# Ryan Khor - a1887993
+# Lucy Fidock - a1884810
+# Nicholas Brown - a1870629
+# Luke Schaefer - a1852210
+# Nelson Then - a1825642
