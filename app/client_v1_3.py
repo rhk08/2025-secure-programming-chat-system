@@ -64,7 +64,6 @@ class Client:
         # File receive state
         self.file_rx = {}  # file_id -> {name,size,sha256,received:int,parts:dict}
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
     # ---------------- Load JSON template from file ----------------
     def _load_json(self, file_path):
         with open(file_path, "r") as file:

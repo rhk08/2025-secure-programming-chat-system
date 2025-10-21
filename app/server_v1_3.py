@@ -32,7 +32,7 @@ class Link:
 
 
 class Server:
-    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False, localhost_mode=False):
+    def __init__(self, host="0.0.0.0", port=9000, introducers=None, introducer_mode=False, localhost_mode=False, discovery_port=9999):
         # --- Server state ---
         self.servers = {}            # server_id -> Link
         self.server_addrs = {}       # server_id -> (host, port, pubkey)
@@ -53,7 +53,7 @@ class Server:
         
         self.port = port
         self.server_uuid = str(uuid.uuid4())
-        self.UDP_DISCOVERY_PORT = 9999
+        self.UDP_DISCOVERY_PORT = discovery_port
 
         self.seen_messages = set()
 
