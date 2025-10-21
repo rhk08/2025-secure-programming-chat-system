@@ -21,7 +21,7 @@ HEARTBEAT_INTERVAL = 10
 
 # Keep RSA-OAEP payload small enough for 2048-bit keys (≈ 190 bytes max)
 FILE_CHUNK_PLAINTEXT = 190
-DOWNLOAD_DIR = "downloads"
+DOWNLOAD_DIR = "app/downloads"
 
 
 class Client:
