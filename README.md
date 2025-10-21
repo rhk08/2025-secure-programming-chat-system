@@ -23,7 +23,7 @@ Note this is the version of our chat system WITH vulnerabilities.
     pip install -r requirements.txt
 
 ## 4. Update bootstrap_servers.json
-Modify the bootstrap_servers.json file to include the ip addresses and port numbers of servers to connect to via bootstrap.
+Modify the app/startup_files/bootstrap_servers.json file to include the ip addresses and port numbers of servers to connect to via bootstrap.
 
 If connecting to another device on LAN, replace the "host" IP address with the private IP address of the device you wish to connect to.
 
@@ -55,16 +55,16 @@ To run the server as an introducer across a LAN network (default), use:
 
 To run the server as an introducer on your local machine, use:
 
-    python -m app.server_v1_3.py [port number] --intro --local
+    python -m app.server_v1_3 [port number] --intro --local
 
 
 
-See the "Update bootstrap_servers.json" section if you have issues 
+See the "Update app/startup_files/bootstrap_servers.json" section if you have issues 
 
 
 Start a non introducer P2P server with:
 
-    python -m app.server_v1_3.py [port number]
+    python -m app.server_v1_3 [port number]
 
 
 
@@ -72,11 +72,11 @@ Start a non introducer P2P server with:
 
 Start the P2P client with:
 
-    python -m app.client_v1_3.py
+    python -m app.client_v1_3
 
 To test locally running clients on different machines, use:
 
-    python -m app.client_v1_3.py ws://[host]:[port]
+    python -m app.client_v1_3 ws://[host]:[port]
 
 You will automatically connect to a server and assigned a UUID
 
@@ -107,13 +107,13 @@ This means you are already using that port for another server Locally
 
 If you ran the line:
     
-    python -m app.server_v1_3.py 9001 --intro
+    python -m app.server_v1_3 9001 --intro
 
 And recieved:
     
     ValueError("No matching introducer found")
         
-This means you have not changed the boostrap_servers.json and cannot assume the role of an introducer, see the "How to Use" section for more detail.
+This means you have not changed the app/startup_files/boostrap_servers.json and cannot assume the role of an introducer, see the "How to Use" section for more detail.
 
 ## Need any help? Please contact a member of our group
 ryan.khor@student.adelaide.edu.au
