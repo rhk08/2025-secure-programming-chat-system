@@ -127,3 +127,6 @@ a1870629@adelaide.edu.au
 nelson.then@student.adelaide.edu.au
 
 
+## tests
+
+python -m app.tests.test_client_basic
