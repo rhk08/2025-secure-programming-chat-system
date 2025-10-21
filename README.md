@@ -129,4 +129,4 @@ nelson.then@student.adelaide.edu.au
 
 ## tests
 
-python -m app.tests.test_client_basic
+pytest -v
