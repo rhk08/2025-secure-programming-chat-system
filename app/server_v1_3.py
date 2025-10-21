@@ -5,19 +5,19 @@ import socket
 import time
 import uuid
 import aiosqlite
-from db import ChatDB
+from app.utils.db import ChatDB
 from copy import deepcopy
 
 from websockets.exceptions import ConnectionClosedOK
 import sys
 
 from cryptography.hazmat.primitives import serialization
-import codec
+import app.utils.codec as codec
 import base64
 
 
 # --- Load bootstrap servers ---
-with open("bootstrap_servers.json", "r") as f:
+with open("app/startup_files/bootstrap_servers.json", "r") as f:
     BOOTSTRAP_SERVERS = json.load(f)
 
 
@@ -41,7 +41,7 @@ class Server:
         self.local_users = {}        # user_id -> Link
         self.user_locations = {}     # user_id -> "local" | server_id
 
-        with open("SOCP.json", 'r') as file:
+        with open("app/SOCP.json", 'r') as file:
             self.JSON_base_template = json.load(file)
 
 
@@ -104,7 +104,7 @@ class Server:
         self.selected_bootstrap_server = {}
 
         # Per-port DB file (one DB per server)
-        self.db = ChatDB(f"databases/chat_{self.port}.db")
+        self.db = ChatDB(f"app/databases/chat_{self.port}.db")
 
         print(f"[{self.server_uuid}] Initialized server on {self.host}:{self.port} ({'INTRODUCER' if self.introducer_mode else 'NORMAL'})")
 

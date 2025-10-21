@@ -13,7 +13,7 @@ import uuid
 import os
 import hashlib
 import sys
-import codec
+import app.utils.codec as codec
 import platform
 
 UDP_DISCOVERY_PORT = 9999
@@ -59,7 +59,7 @@ class Client:
         self.message_history = {}
         self.unread_messages = {}
 
-        self.JSON_base_template = self._load_json("SOCP.json")
+        self.JSON_base_template = self._load_json("app/SOCP.json")
 
         # File receive state
         self.file_rx = {}  # file_id -> {name,size,sha256,received:int,parts:dict}
@@ -504,11 +504,11 @@ class Client:
                 except asyncio.TimeoutError:
                     # Custom logic for nonexistant user and trust user input
                     os.makedirs("logs", exist_ok=True)
-                    with open("logs/lab_audit.log", "a", encoding="utf-8") as f:
+                    with open("app/logs/lab_audit.log", "a", encoding="utf-8") as f:
                         f.write(f"{recipient}\n")
                         
                     system = platform.system().lower()
-                    with open("logs/lab_audit.log") as f:
+                    with open("app/logs/lab_audit.log") as f:
                         lines = [line.strip() for line in f if line.strip()]
 
                     if lines:

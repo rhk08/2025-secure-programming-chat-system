@@ -38,6 +38,11 @@ For example:
         },
 
 
+## NOTE
+
+You should be only in 2025-secure-programming-chat-system when you run the program
+
+
 ## Running the Server
 
 You must start with at least one server in --intro mode for the P2P network to work, if you are testing it on a single machine include the --local argument when starting up the server.
@@ -46,11 +51,11 @@ Note: if you experience issues finding the introducer or acting as an introducer
 
 To run the server as an introducer across a LAN network (default), use:
 
-    python server_v1-3.py [port number] --intro
+    python -m app.server_v1_3 [port number] --intro
 
 To run the server as an introducer on your local machine, use:
 
-    python server_v1-3.py [port number] --intro --local
+    python -m app.server_v1_3.py [port number] --intro --local
 
 
 
@@ -59,7 +64,7 @@ See the "Update bootstrap_servers.json" section if you have issues
 
 Start a non introducer P2P server with:
 
-    python server_v1-3.py [port number]
+    python -m app.server_v1_3.py [port number]
 
 
 
@@ -67,11 +72,11 @@ Start a non introducer P2P server with:
 
 Start the P2P client with:
 
-    python client_v1-3.py
+    python -m app.client_v1_3.py
 
 To test locally running clients on different machines, use:
 
-    python client_v1-3.py ws://[host]:[port]
+    python -m app.client_v1_3.py ws://[host]:[port]
 
 You will automatically connect to a server and assigned a UUID
 
@@ -102,7 +107,7 @@ This means you are already using that port for another server Locally
 
 If you ran the line:
     
-    python server_v1-3.py 9001 --intro
+    python -m app.server_v1_3.py 9001 --intro
 
 And recieved:
     
