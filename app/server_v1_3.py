@@ -60,6 +60,7 @@ class Server:
         # Pick introducer
         selected = None
         if introducer_mode:
+            self.introducers = introducers or BOOTSTRAP_SERVERS
             for entry in BOOTSTRAP_SERVERS:
                 if entry["host"] == self.host and entry["port"] == port:
                     selected = entry
@@ -170,6 +171,14 @@ class Server:
             if server_uuid:
                 self.servers.pop(server_uuid, None)
                 self.server_addrs.pop(server_uuid, None)
+                
+                # Remove remote users located on this server
+                for client_id, location in list(self.user_locations.items()):
+                    if location == server_uuid:
+                        self.local_users.pop(client_id, None)
+                        self.user_locations.pop(client_id, None)
+                        print(f"Removed remote user {client_id} due to server disconnect")
+                
                 print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri}")
     
     async def construct_error_message(self, code, recipient, detail):
@@ -872,13 +881,14 @@ class Server:
             if server_uuid:
                 self.servers.pop(server_uuid, None)
                 self.server_addrs.pop(server_uuid, None)
-
+                
             # call clean-up client on user disconnect
             for client_id, link in list(self.local_users.items()):
                 if link.websocket == ws:
                     await self.cleanup_client(client_id)
                     self.local_users.pop(client_id, None)
                     self.user_locations.pop(client_id, None)
+                    print(f"Cleaned Client Id: {client_id}")
 
             print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
 
@@ -1073,9 +1083,8 @@ class Server:
         )
         print(f"[{self.server_uuid}] Listening on {self.host}:{self.port}")
 
-        if not self.introducer_mode:
-            # needs signing
-            await self.bootstrap()
+        await self.bootstrap()
+        
 
         udp_task = asyncio.create_task(self.udp_discovery_server())
         self.tasks.append(udp_task)
@@ -1089,14 +1098,28 @@ class Server:
         await self._shutdown_event.wait()
 
     async def bootstrap(self):
+        if not self.introducers:
+            print(f"[{self.server_uuid}] No peer introducers found, skipping bootstrap")
+            return
+
         for entry in self.introducers:
+            # Skip self host/port
+            if entry['host'] == self.host and entry['port'] == self.port:
+                continue
+
             uri = f"ws://{entry['host']}:{entry['port']}"
             try:
                 await self._connect_to_introducer(uri, entry)
                 return
             except Exception as e:
                 print(f"[{self.server_uuid}] Bootstrap fail {uri}: {e}")
-        raise ValueError("Unable to connect to any introducer")
+
+        # Only raise if this server is not an introducer
+        if not getattr(self, "introducer_mode", False):
+            raise ValueError("Unable to connect to any introducer")
+        else:
+            print(f"[{self.server_uuid}] Introducer mode: could not connect to other introducers, continuing")
+
 
     async def _connect_to_introducer(self, uri, entry):
         self._incoming_responses[uri] = asyncio.Queue()
