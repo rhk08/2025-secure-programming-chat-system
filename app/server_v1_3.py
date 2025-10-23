@@ -150,36 +150,6 @@ class Server:
             else:
                 await queue.put(raw)
                 await asyncio.sleep(0)
-
-    async def outgoing_connection_handler(self, ws, uri):
-        """Handle messages for an outgoing websocket connection."""
-        try:
-            async for msg in ws:
-                try:
-                    frame = json.loads(msg)
-                except Exception:
-                    continue
-                print(f"[{self.server_uuid}] Received {frame.get('type')} from {frame.get('from')} on {uri}")
-
-                if uri in self._incoming_responses:
-                    await self._incoming_responses[uri].put(msg)
-                    
-        except websockets.exceptions.ConnectionClosed:
-            print(f"[{self.server_uuid}] Outgoing connection closed for {uri}")
-        finally:
-            server_uuid = self.servers_websockets.pop(ws, None)
-            if server_uuid:
-                self.servers.pop(server_uuid, None)
-                self.server_addrs.pop(server_uuid, None)
-                
-                # Remove remote users located on this server
-                for client_id, location in list(self.user_locations.items()):
-                    if location == server_uuid:
-                        self.local_users.pop(client_id, None)
-                        self.user_locations.pop(client_id, None)
-                        print(f"Removed remote user {client_id} due to server disconnect")
-                
-                print(f"[{self.server_uuid}] Cleaned up outgoing peer {server_uuid} for {uri}")
     
     async def construct_error_message(self, code, recipient, detail):
         # codes: USER_NOT_FOUND, INVALID_SIG, BAD_KEY, TIMEOUT, UNKNOWN_TYPE, NAME_IN_USE
@@ -249,6 +219,9 @@ class Server:
         remote_host, remote_port = ws.remote_address
         uri = f"ws://{remote_host}:{remote_port}"
 
+        
+        
+        
         if ws in self.servers_websockets:
             server_uuid = self.servers_websockets[ws]
             link = self.servers.get(server_uuid)
@@ -265,6 +238,10 @@ class Server:
                 msg_type = frame.get("type")
                 print(f"[{self.server_uuid}] Received {msg_type} from {frame.get('from')}")
 
+                
+                if uri in self._incoming_responses:
+                    await self._incoming_responses[uri].put(msg)
+                
                 # --- Server ↔ Introducer join ---
                 if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
                     # SERVER_HELLO_JOIN sending and recieving needs verification
@@ -315,11 +292,6 @@ class Server:
                 
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 if msg_type == "USER_REMOVE":
-                    
-                    payload = frame.get("payload", {})
-                    user_location = payload.get("server_id")
-                    user_id = payload.get("user_id")
-
                     # only remove and forward if we haven't done so yet
                     if user_id in self.user_locations:
                         # 1) Verify server signature 
@@ -887,6 +859,12 @@ class Server:
                 self.servers.pop(server_uuid, None)
                 self.server_addrs.pop(server_uuid, None)
                 
+                for client_id, location in list(self.user_locations.items()):
+                    if location == server_uuid:
+                        self.local_users.pop(client_id, None)
+                        self.user_locations.pop(client_id, None)
+                        print(f"Removed remote user {client_id} due to server disconnect")
+                
             # call clean-up client on user disconnect
             for client_id, link in list(self.local_users.items()):
                 if link.websocket == ws:
@@ -898,20 +876,29 @@ class Server:
             print(f"[{self.server_uuid}] Removed peer {server_uuid or '<unknown>'} for {uri}")
 
     async def handle_server_hello_join(self, frame, ws):
-        assigned_id = frame["from"]
-        clients_list = []
-        for server_id, (host, port, pubkey) in self.server_addrs.items():
-            clients_list.append({"user_id": server_id, "host": host, "port": port, "pubkey": pubkey})
-        welcome = {
-            "type": "SERVER_WELCOME",
-            "from": self.server_uuid,
-            "to": assigned_id,
-            "ts": int(time.time() * 1000),
-            "payload": {"assigned_id": assigned_id, "clients": clients_list},
-            "sig": "..."
-        }
-        await ws.send(json.dumps(welcome))
-        print(f"[{self.server_uuid}] Sent SERVER_WELCOME to {assigned_id}")
+        try:
+            peer_public_key = codec.decode_public_key_base64url(frame["payload"]["pubkey"])
+            codec.verify_payload_signature(frame, peer_public_key)
+        
+            assigned_id = frame["from"]
+            clients_list = []
+            for server_id, (host, port, pubkey) in self.server_addrs.items():
+                clients_list.append({"user_id": server_id, "host": host, "port": port, "pubkey": pubkey})
+            welcome = {
+                "type": "SERVER_WELCOME",
+                "from": self.server_uuid,
+                "to": assigned_id,
+                "ts": int(time.time() * 1000),
+                "payload": {"assigned_id": assigned_id, "clients": clients_list},
+                "sig": codec.generate_payload_signature(
+                    {"payload": {"assigned_id": assigned_id, "clients": clients_list}},
+                    self.private_key
+                )
+            }
+            await ws.send(json.dumps(welcome))
+            print(f"[{self.server_uuid}] Sent SERVER_WELCOME to {assigned_id}")
+        except Exception as e:
+            print(f"[{self.server_uuid}] Failed to process SERVER_HELLO_JOIN: {e}")
 
     async def handle_server_announce(self, frame, ws):
         try:
@@ -923,13 +910,12 @@ class Server:
             port = frame["payload"]["port"]
             pubkey = frame["payload"]["pubkey"]
             peer_uri = f"ws://{host}:{port}"
+            
             if server_uuid not in self.servers:
-                peer_ws = await websockets.connect(peer_uri)
-                self.servers[server_uuid] = Link(peer_ws)
-                task = asyncio.create_task(self.outgoing_connection_handler(peer_ws, peer_uri))
-                self.tasks.append(task)
+                self.servers[server_uuid] = Link(ws)
                 self.server_addrs[server_uuid] = (host, port, pubkey)
-                self.servers_websockets[peer_ws] = server_uuid
+                self.servers_websockets[ws] = server_uuid
+
                 print(f"[{self.server_uuid}] Linked to peer {server_uuid} at {peer_uri}")
         except Exception as e:
             print(f"[{self.server_uuid}] Failed to process SERVER_ANNOUNCE: {e}")
@@ -937,31 +923,20 @@ class Server:
     
     async def handle_msg_public_channel(self, frame, ws):
         sender = frame.get("from", "")
-        payload = frame.get("payload")
         ts = frame.get("ts")
+        payload = frame.get("payload", {})
     
         # Duplicate message check - prevent loops
-        msg_id = f"{payload}:{ts}:public"
+        msg_id = f"{sender}:{ts}:public"
         if msg_id in self.seen_messages:
             print(f"[{self.server_uuid}] Duplicate MSG_PUBLIC_CHANNEL from {sender}, ignoring")
             return
         self.seen_messages.add(msg_id)
-
+        
         # Limit set size
         if len(self.seen_messages) > 10000:
             self.seen_messages = set(list(self.seen_messages)[-5000:])
         
-        # 1) verify signature
-        if not await self.verify_sender_signature(frame, ws):
-            return
-        
-        frame["from"] = self.server_uuid
-        del frame["sig"]
-
-        frame["sig"] = codec.generate_payload_signature(
-            frame,
-            self.private_key
-        )
         
         print(f"[{self.server_uuid}] Received MSG_PUBLIC_CHANNEL from {sender}")
         # Fan out to all local users
@@ -1143,7 +1118,7 @@ class Server:
         # Create outgoing connection to introducer
         ws = await websockets.connect(uri)
         print(f"[{self.server_uuid}] Connected introducer {uri}")
-        task = asyncio.create_task(self.outgoing_connection_handler(ws, uri))
+        task = asyncio.create_task(self.incoming_connection_handler(ws))
         self.tasks.append(task)
         
         # create the hello join message and wait for response
@@ -1154,6 +1129,10 @@ class Server:
         # TODO need to get updated state of public group memebers
 
     async def _handle_server_welcome(self, frame, ws, entry):
+        #Verify message
+        introducer_public_key = codec.decode_public_key_base64url(entry["public_key"])
+        codec.verify_payload_signature(frame, introducer_public_key)
+            
         # save server welcome
         server_uuid = frame["from"]
         self.server_addrs[server_uuid] = (entry["host"], entry["port"], entry["public_key"])
@@ -1175,21 +1154,13 @@ class Server:
             return
         peer_ws = await websockets.connect(peer_uri)
         self.servers[server_uuid] = Link(peer_ws)
-        task = asyncio.create_task(self.outgoing_connection_handler(peer_ws, peer_uri))
+        task = asyncio.create_task(self.incoming_connection_handler(peer_ws))
         self.tasks.append(task)
         self.server_addrs[server_uuid] = (host, port, pubkey)
         self.servers_websockets[peer_ws] = server_uuid
         print(f"[{self.server_uuid}] Linked peer {server_uuid} {peer_uri}")
 
-    def _build_hello_join(self, entry):
-        return {
-            "type": "SERVER_HELLO_JOIN",
-            "from": self.server_uuid,
-            "to": f"{entry['host']}:{entry['port']}",
-            "ts": int(time.time() * 1000),
-            "payload": {"host": self.host, "port": self.port, "pubkey": self.public_key_base64url},
-            "sig": "...",
-        }
+
 
     async def _broadcast_server_announce(self):
         announce = {
@@ -1209,6 +1180,16 @@ class Server:
                 print(f"[{self.server_uuid}] Sent SERVER_ANNOUNCE to {server_uuid}")
             except Exception:
                 pass
+            
+    def _build_hello_join(self, entry):
+        return {
+            "type": "SERVER_HELLO_JOIN",
+            "from": self.server_uuid,
+            "to": f"{entry['host']}:{entry['port']}",
+            "ts": int(time.time() * 1000),
+            "payload": {"host": self.host, "port": self.port, "pubkey": self.public_key_base64url},
+            "sig": codec.generate_payload_signature({"payload": {"host": self.host, "port": self.port, "pubkey": self.public_key_base64url}},self.private_key),
+        }
 
 
 async def main():
