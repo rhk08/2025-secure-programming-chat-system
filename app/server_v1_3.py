@@ -315,6 +315,11 @@ class Server:
                 
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 if msg_type == "USER_REMOVE":
+                    
+                    payload = frame.get("payload", {})
+                    user_location = payload.get("server_id")
+                    user_id = payload.get("user_id")
+
                     # only remove and forward if we haven't done so yet
                     if user_id in self.user_locations:
                         # 1) Verify server signature 
@@ -932,20 +937,31 @@ class Server:
     
     async def handle_msg_public_channel(self, frame, ws):
         sender = frame.get("from", "")
+        payload = frame.get("payload")
         ts = frame.get("ts")
-        payload = frame.get("payload", {})
     
         # Duplicate message check - prevent loops
-        msg_id = f"{sender}:{ts}:public"
+        msg_id = f"{payload}:{ts}:public"
         if msg_id in self.seen_messages:
             print(f"[{self.server_uuid}] Duplicate MSG_PUBLIC_CHANNEL from {sender}, ignoring")
             return
         self.seen_messages.add(msg_id)
-        
+
         # Limit set size
         if len(self.seen_messages) > 10000:
             self.seen_messages = set(list(self.seen_messages)[-5000:])
         
+        # 1) verify signature
+        if not await self.verify_sender_signature(frame, ws):
+            return
+        
+        frame["from"] = self.server_uuid
+        del frame["sig"]
+
+        frame["sig"] = codec.generate_payload_signature(
+            frame,
+            self.private_key
+        )
         
         print(f"[{self.server_uuid}] Received MSG_PUBLIC_CHANNEL from {sender}")
         # Fan out to all local users
