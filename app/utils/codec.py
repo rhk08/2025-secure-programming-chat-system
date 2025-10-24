@@ -99,8 +99,9 @@ def decode_public_key_base64url(key_base64url):
     )
     return decoded_key_object
 
+
 # ====================
-# Group Members
+# Group 40
 # ====================
 # Ryan Khor - a1887993
 # Lucy Fidock - a1884810

@@ -650,8 +650,9 @@ def test_constants_defined():
     assert HEARTBEAT_INTERVAL == 10
     assert FILE_CHUNK_PLAINTEXT == 190
     assert DOWNLOAD_DIR == "app/downloads"
+
 # ====================
-# Group Members
+# Group 40
 # ====================
 # Ryan Khor - a1887993
 # Lucy Fidock - a1884810

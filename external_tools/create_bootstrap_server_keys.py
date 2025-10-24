@@ -70,8 +70,9 @@ else:
     print("Bootstrap servers JSON created successfully.")
 
 # 2. Generate keys_list for each server
+
 # ====================
-# Group Members
+# Group 40
 # ====================
 # Ryan Khor - a1887993
 # Lucy Fidock - a1884810

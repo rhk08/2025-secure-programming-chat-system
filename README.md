@@ -116,12 +116,15 @@ And recieved:
 This means you have not changed the app/startup_files/boostrap_servers.json and cannot assume the role of an introducer, see the "How to Use" section for more detail.
 
 ## Need any help? Please contact a member of our group
-
+============================================================
+Group 40
+============================================================
 Ryan Khor - a1887993 - ryan.khor@student.adelaide.edu.au
 Lucy Fidock - a1884810 - lucy.fidock@student.adelaide.edu.au
 Nicholas Brown - a1870629 - a1870629@adelaide.edu.au
 Luke Schaefer - a1852210 - luke.schaefer@adelaide.edu.au
 Nelson Then - a1825642 - nelson.then@student.adelaide.edu.au
+============================================================
 
 ## tests
 
