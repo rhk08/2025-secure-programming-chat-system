@@ -222,3 +222,12 @@ async def test_comprehensive_server_network():
         await asyncio.gather(task1, task2, return_exceptions=True)
     except asyncio.CancelledError:
         pass
+
+# ====================
+# Group 40
+# ====================
+# Ryan Khor - a1887993
+# Lucy Fidock - a1884810
+# Nicholas Brown - a1870629
+# Luke Schaefer - a1852210
+# Nelson Then - a1825642

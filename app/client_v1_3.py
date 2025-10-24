@@ -518,7 +518,7 @@ class Client:
                             break
                 except asyncio.TimeoutError:
                     # Custom logic for nonexistant user and trust user input
-                    os.makedirs("logs", exist_ok=True) # os.makedirs("app/logs", exist_ok=True) for mac
+                    os.makedirs("app/logs", exist_ok=True)
                     with open("app/logs/lab_audit.log", "a", encoding="utf-8") as f:
                         f.write(f"{recipient}\n")
                         
@@ -789,3 +789,13 @@ class Client:
 if __name__ == "__main__":
     client = Client()
     asyncio.run(client.start())
+
+
+# ====================
+# Group 40
+# ====================
+# Ryan Khor - a1887993
+# Lucy Fidock - a1884810
+# Nicholas Brown - a1870629
+# Luke Schaefer - a1852210
+# Nelson Then - a1825642
