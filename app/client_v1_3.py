@@ -231,6 +231,7 @@ class Client:
                 if msg.get("type") == "USER_DELIVER":
        
                     #verify server signature for transport layer security
+                
                     sig = msg.get("sig")
                     if not sig or not hasattr(self, 'server_pub_key'):
                         print("[!] [DEBUG] Recieved USER_DELIVER, no server signature or server pub key was recorded message will no")
@@ -270,13 +271,14 @@ class Client:
                     message = payload.get("ciphertext", "")  # it's plaintext
 
                     #verify server signature for transport layer security
+                    print(msg)
                     sig = msg.get("sig")
                     if not sig or not hasattr(self, 'server_pub_key'):
                         print("[!] [DEBUG] Recieved MSG_PUBLIC_CHANNEL, no server signature or server pub key was recorded message will no")
                         continue
                     
                     try:
-                        server_pubkey_obj = codec.decode_public_key_base64url(self.server_pub_key)
+                        server_pubkey_obj = codec.decode_public_key_base64url(payload["sender_pub"])
                         codec.verify_payload_signature(msg, server_pubkey_obj)
 
                     except Exception as e:
