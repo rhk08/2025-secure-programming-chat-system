@@ -268,6 +268,20 @@ class Client:
                     payload = msg.get("payload", {})
                     sender = msg.get("from")
                     message = payload.get("ciphertext", "")  # it's plaintext
+
+                    #verify server signature for transport layer security
+                    sig = msg.get("sig")
+                    if not sig or not hasattr(self, 'server_pub_key'):
+                        print("[!] [DEBUG] Recieved MSG_PUBLIC_CHANNEL, no server signature or server pub key was recorded message will no")
+                        continue
+                    
+                    try:
+                        server_pubkey_obj = codec.decode_public_key_base64url(self.server_pub_key)
+                        codec.verify_payload_signature(msg, server_pubkey_obj)
+
+                    except Exception as e:
+                        print(f"[!] [DEBUG] Server signature verification failed: {e}")
+                        continue
                     
                     # Display sender as friendly name if they're in friends list
                     sender_display = self.friends_by_id.get(sender, sender)
@@ -570,6 +584,11 @@ class Client:
                     "sender_pub": self.public_key_base64url,
                     "content_sig": "..."
                 }
+                # signature for user -> server
+                msg_public["sig"] = codec.generate_payload_signature(
+                    msg_public,
+                    self.private_key
+                )
                 
                 await self.websocket.send(json.dumps(msg_public))
                 print("[i] Public message sent successfully!")
@@ -612,6 +631,15 @@ class Client:
                     print("[!] Usage: sendfile <recipient> <path>")
                     continue
                 recipient = cmd_parts[1]
+
+                # Check if recipient is on friends list
+                friend_receiving = self.friends_by_name.get(cmd_parts[1])
+                if friend_receiving != None:
+                    recipient = friend_receiving
+                    friend_receiving = cmd_parts[1]
+                else:
+                    recipient = cmd_parts[1]
+
                 path = cmd_parts[2]
                 await self.send_file_dm(recipient, path)
                 continue
