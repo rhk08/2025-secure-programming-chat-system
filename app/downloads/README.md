@@ -1,4 +1,4 @@
-# 2025-secure-programming-chat-system
+# 2025-secure-programming-chat-system - Group 40
 
 Note this is the version of our chat system WITH vulnerabilities. 
 
