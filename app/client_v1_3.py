@@ -271,7 +271,6 @@ class Client:
                     message = payload.get("ciphertext", "")  # it's plaintext
 
                     #verify server signature for transport layer security
-                    print(msg)
                     sig = msg.get("sig")
                     if not sig or not hasattr(self, 'server_pub_key'):
                         print("[!] [DEBUG] Recieved MSG_PUBLIC_CHANNEL, no server signature or server pub key was recorded message will no")

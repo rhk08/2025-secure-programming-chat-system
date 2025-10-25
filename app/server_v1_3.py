@@ -292,10 +292,16 @@ class Server:
                 
                 # TODO: Handle USER_REMOVE (remove user if mapping matches)
                 if msg_type == "USER_REMOVE":
+                    payload = frame.get("payload")
+                    user_location = payload.get("server_id")
+                    user_id = payload.get("user_id")
+                
                     # only remove and forward if we haven't done so yet
                     if user_id in self.user_locations:
                         # 1) Verify server signature 
-                        _, _, pubkey = self.server_addrs[user_location] 
+                        if user_location not in self.server_addrs:
+                            print(f"[{self.server_uuid}] Unknown server {user_location} for USER_REMOVE")
+                            continue
 
                         try:
                             pubkey_obj = codec.decode_public_key_base64url(pubkey)
@@ -306,10 +312,6 @@ class Server:
                             continue
 
                         # 2) remove
-                        payload = frame.get("payload")
-                        user_location = payload.get("server_id")
-                        user_id = payload.get("user_id")
-
                         self.local_users.pop(user_id, None)
                         self.user_locations.pop(user_id, None)
                         self.server_addrs.pop(user_id, None)
