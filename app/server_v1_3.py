@@ -241,6 +241,12 @@ class Server:
                 
                 if uri in self._incoming_responses:
                     await self._incoming_responses[uri].put(msg)
+
+                if msg_type == "PUB_KEY":
+                    # This is a response, don't process it here, just queue it
+                    if uri in self._incoming_responses:
+                        await self._incoming_responses[uri].put(msg)
+                    continue  # Don't process further
                 
                 # --- Server ↔ Introducer join ---
                 if self.introducer_mode and msg_type == "SERVER_HELLO_JOIN":
@@ -302,6 +308,7 @@ class Server:
                         if user_location not in self.server_addrs:
                             print(f"[{self.server_uuid}] Unknown server {user_location} for USER_REMOVE")
                             continue
+                        _, _, pubkey = self.server_addrs[user_location] 
 
                         try:
                             pubkey_obj = codec.decode_public_key_base64url(pubkey)
@@ -723,8 +730,12 @@ class Server:
                             "recipient_pub": pub_key,
                             "recipient_uuid": target
                         }
+                        message_json['sig'] = codec.generate_payload_signature(
+                            message_json,
+                            self.private_key
+                        )
                         await ws.send(json.dumps(message_json))
-                        print(f"[{self.server_uuid}] Sent local public key for {target}")
+                        print(f"[{self.server_uuid}] Sent local public key for {target} to {requester}")
                         
                     else: 
                         # Get pubkey for user connected to another server
@@ -733,13 +744,25 @@ class Server:
                             if not server_location or server_location == "local":
                                 # User not found or should be local but isn't in client_public_keys
                                 print(f"[!] [DEBUG] user {target} does not exist")
-                                error_msg = await self.construct_error_message("USER_NOT_FOUND", requester, "[!] [DEBUG] user {target} does not exist")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", requester, f"[!] [DEBUG] user {target} does not exist")
                                 await ws.send(json.dumps(error_msg))
                                 continue
                                 
                             if server_location not in self.servers:
                                 print(f"[{self.server_uuid}] Server {server_location} not connected")
+                                error_msg = await self.construct_error_message("USER_NOT_FOUND", requester, f"[{self.server_uuid}] Server {server_location} not connected")
+                                await ws.send(json.dumps(error_msg))
                                 continue
+
+                            # get the websocket for this server
+                            server_link = self.servers[server_location]
+                            server_ws = server_link.websocket
+                            
+                            # build URI from websocket connection
+                            remote_host, remote_port = server_ws.remote_address
+                            actual_uri = f"ws://{remote_host}:{remote_port}"
+                            
+                            print(f"[DEBUG] Using actual_uri: {actual_uri} for server {server_location}")
 
                             # Create the request message  
                             pubkey_request = deepcopy(self.JSON_base_template)
@@ -748,51 +771,67 @@ class Server:
                             pubkey_request['to'] = server_location
                             pubkey_request['ts'] = time.time()
                             pubkey_request['payload'] = {
-                                "recipient_uuid": target  # Fixed: was 'recipient' before
+                                "recipient_uuid": target
                             }
                             pubkey_request['sig'] = codec.generate_payload_signature(
                                 pubkey_request,
                                 self.private_key
                             )
                             
-                            # Send to the correct server
-                            server_uri = f"ws://{self.server_addrs[server_location][0]}:{self.server_addrs[server_location][1]}"
+                            # Make sure we have a response queue for this actual URI
+                            if actual_uri not in self._incoming_responses:
+                                self._incoming_responses[actual_uri] = asyncio.Queue()
+                                print(f"[DEBUG] Created response queue for {actual_uri}")
                             
-                            # Make sure we have a response queue for this URI
-                            if server_uri not in self._incoming_responses:
-                                self._incoming_responses[server_uri] = asyncio.Queue()
-                                
-                            await self.servers[server_location].websocket.send(json.dumps(pubkey_request))
-                            print(f"[{self.server_uuid}] Sent PUB_KEY_REQUEST to {server_location} for {target}")
+                            await server_ws.send(json.dumps(pubkey_request))
+                            print(f"[{self.server_uuid}] Sent PUB_KEY_REQUEST to {server_location} for {target} via {actual_uri}")
 
                             # Wait for PUB_KEY response from that specific server
-                            response_msg = await self.wait_for_message(server_uri, "PUB_KEY")
-                            response_payload = response_msg.get("payload", {})
+                            print(f"[DEBUG] Waiting for PUB_KEY response on {actual_uri}...")
                             
-                            if response_payload.get("recipient_uuid") == target:
-                                pub_key = response_payload.get("recipient_pub")
+                            try:
+                                response_msg = await asyncio.wait_for(
+                                    self.wait_for_message(actual_uri, "PUB_KEY"),
+                                    timeout=10.0  # Add timeout to prevent infinite hang
+                                )
+                                response_payload = response_msg.get("payload", {})
                                 
-                                # Forward the response back to the original requester
-                                message_json = deepcopy(self.JSON_base_template)
-                                message_json['type'] = "PUB_KEY"
-                                message_json['from'] = self.server_uuid
-                                message_json['to'] = requester
-                                message_json['ts'] = time.time()
-                                message_json['payload'] = {
-                                    "recipient_pub": pub_key,
-                                    "recipient_uuid": target
-                                }
-                                await ws.send(json.dumps(message_json))
-                                print(f"[{self.server_uuid}] Forwarded public key for {target} to {requester}")
-                            else:
-                                print(f"[{self.server_uuid}] Received wrong PUB_KEY response")
-                                error_msg = await self.construct_error_message("BAD_KEY", self.server_uuid, "[{self.server_uuid}] Received wrong PUB_KEY response")
+                                print(f"[DEBUG] Received PUB_KEY response: recipient_uuid={response_payload.get('recipient_uuid')}, expected={target}")
+                                
+                                if response_payload.get("recipient_uuid") == target:
+                                    pub_key = response_payload.get("recipient_pub")
+                                    
+                                    # Forward the response back to the original requester
+                                    message_json = deepcopy(self.JSON_base_template)
+                                    message_json['type'] = "PUB_KEY"
+                                    message_json['from'] = self.server_uuid
+                                    message_json['to'] = requester
+                                    message_json['ts'] = time.time()
+                                    message_json['payload'] = {
+                                        "recipient_pub": pub_key,
+                                        "recipient_uuid": target
+                                    }
+                                    message_json['sig'] = codec.generate_payload_signature(
+                                        message_json,
+                                        self.private_key
+                                    )
+                                    await ws.send(json.dumps(message_json))
+                                    print(f"[{self.server_uuid}] Forwarded public key for {target} to {requester}")
+                                else:
+                                    print(f"[{self.server_uuid}] Received wrong PUB_KEY response")
+                                    error_msg = await self.construct_error_message("BAD_KEY", requester, f"[{self.server_uuid}] Received wrong PUB_KEY response")
+                                    await ws.send(json.dumps(error_msg))
+                                    
+                            except asyncio.TimeoutError:
+                                print(f"[{self.server_uuid}] Timeout waiting for PUB_KEY response from {server_location}")
+                                error_msg = await self.construct_error_message("TIMEOUT", requester, f"[{self.server_uuid}] Timeout waiting for PUB_KEY response")
                                 await ws.send(json.dumps(error_msg))
-                                
 
                         except Exception as e:
                             print(f"[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {e}")
-                            error_msg = await self.construct_error_message("BAD_KEY", self.server_uuid, "[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            error_msg = await self.construct_error_message("BAD_KEY", requester, f"[{self.server_uuid}] Error handling cross-server PUB_KEY_REQUEST: {str(e)}")
                             await ws.send(json.dumps(error_msg))
 
                     continue
