@@ -491,8 +491,6 @@ class Client:
                     recipient = cmd_parts[1]
 
                 message = " ".join(cmd_parts[2:])
-                
-                print(message)
 
                 # request recipient pubkey
                 pubkey_request = deepcopy(self.JSON_base_template)

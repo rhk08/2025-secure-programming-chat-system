@@ -1130,6 +1130,8 @@ class Server:
 
     async def _handle_server_welcome(self, frame, ws, entry):
         #Verify message
+        print(frame)
+        print(entry)
         introducer_public_key = codec.decode_public_key_base64url(entry["public_key"])
         codec.verify_payload_signature(frame, introducer_public_key)
             
